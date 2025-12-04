@@ -1,7 +1,7 @@
 // services/api.ts
 
-// 修改 API_BASE
-export const API_BASE = 'http://localhost';
+// API_BASE
+export const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
 // 定義後端回傳的檔案格式
 export interface GCSFile {

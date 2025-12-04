@@ -21,7 +21,7 @@ pip install -r requirements.txt
 if [ ! -f "token.pickle" ]; then
     echo ""
     echo "首次執行，需要進行 OAuth 認證..."
-    python gcs_auth.py
+    python ./utils/gcs_auth.py
 fi
 
 # 啟動服務
