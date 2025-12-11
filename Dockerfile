@@ -4,6 +4,9 @@
 # Stage 1: 建立前端
 # ============================================================
 FROM node:18-alpine AS frontend-builder
+# 定義構建參數
+ARG VITE_API_URL=http://localhost
+ARG NODE_ENV=prod
 
 WORKDIR /app/frontend
 
@@ -16,8 +19,21 @@ RUN npm ci
 # 複製前端所有檔案
 COPY ./ ./
 
+# 設置環境變數（供 Vite 使用）
+ENV VITE_API_URL=${VITE_API_URL}
+ENV NODE_ENV=${NODE_ENV}
+
+# 顯示構建信息（用於調試）
+RUN echo "Building with:" && \
+    echo "  VITE_API_URL=${VITE_API_URL}" && \
+    echo "  NODE_ENV=${NODE_ENV}"
+
 # 建立生產版本
 RUN npm run build
+
+# 驗證構建結果
+RUN ls -la dist/ && \
+    echo "Build completed successfully"
 
 # ============================================================
 # Stage 2: 建立最終映像
@@ -28,27 +44,17 @@ FROM python:3.11-slim
 ENV PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive \
     APP_HOME=/app \
-    GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/application_default_credentials.json
+    GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/credentials.json
 
 WORKDIR $APP_HOME
 
-# 安裝系統依賴（修正 gcloud CLI 安裝方式）
+# 安裝系統依賴
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     nginx \
     supervisor \
     curl \
-    gnupg \
-    lsb-release \
-    apt-transport-https \
     ca-certificates \
-    && mkdir -p /usr/share/keyrings \
-    && curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
-       | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
-       | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list \
-    && apt-get update \
-    && apt-get install -y google-cloud-cli \
     && rm -rf /var/lib/apt/lists/*
 
 # 複製並安裝 Python 依賴
@@ -67,7 +73,7 @@ COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY startup.sh ./
 
 # 建立必要目錄
-RUN mkdir -p backend/credentials backend/tokens /var/log/supervisor && \
+RUN mkdir -p backend/credentials /var/log/supervisor && \
     chmod +x startup.sh
 
 # 暴露 port

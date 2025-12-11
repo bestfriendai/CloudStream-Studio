@@ -1,62 +1,131 @@
-# .dockerignore
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm/
+.yarn/
+dist/
+dist-ssr/
+*.local
 
-# Node
-frontend/node_modules/
-frontend/dist/
-frontend/.vite/
-npm-debug.log
-.npm
-
-# Python
-backend/__pycache__/
-backend/*.py[cod]
-backend/*$py.class
-backend/*.so
-backend/.Python
+# ============================================================
+# Python 相關
+# ============================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
 backend/venv/
-backend/env/
+backend/.venv/
+backend/__pycache__/
+venv/
+.venv/
+*.egg-info/
+pip-log.txt
+pip-delete-this-directory.txt
 
-# IDE
+# ============================================================
+# 環境變數
+# ============================================================
+.env.local
+.env.*.local
+
+# ============================================================
+# 認證文件（重要！）
+# ============================================================
+credentials/
+*.json
+!package*.json
+!package-lock.json
+!tsconfig*.json
+
+# ============================================================
+# Git
+# ============================================================
+.git/
+.gitignore
+.gitattributes
+.github/
+
+# ============================================================
+# IDE 和編輯器
+# ============================================================
 .vscode/
 .idea/
 *.swp
 *.swo
-
-# Git
-.git/
-.gitignore
-.gitattributes
-
-# 環境變數
-.env
-.env.local
-.env.production
-
-# Token (會在容器內產生)
-backend/tokens/*.pickle
-
-# 日誌
-*.log
-logs/
-
-# OS
+*~
 .DS_Store
 Thumbs.db
-.AppleDouble
-.LSOverride
+desktop.ini
 
-# Docker
-Dockerfile
-docker-compose.yml
-.dockerignore
-README_DOCKER.md
+# ============================================================
+# 日誌
+# ============================================================
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
+# ============================================================
 # 測試
-backend/test_*.py
-frontend/src/**/*.test.ts
-frontend/src/**/*.test.tsx
+# ============================================================
+.pytest_cache/
+.coverage
+htmlcov/
+coverage/
+*.cover
+.hypothesis/
+.tox/
+.nox/
+test-results/
+playwright-report/
 
-# 文件
-*.md
+# ============================================================
+# 文檔
+# ============================================================
+README.md
 docs/
+*.md
+!package.md
 
+# ============================================================
+# 腳本和工具
+# ============================================================
+test-*.sh
+check_*.py
+setup_*.sh
+scripts/
+docker-cleanup.sh
+docker-build-test.sh
+
+# ============================================================
+# 暫存和備份
+# ============================================================
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp
+*.old
+*~
+dist_check/
+
+# ============================================================
+# Docker 相關
+# ============================================================
+docker-compose*.yml
+Dockerfile.dev
+.dockerignore
+
+# ============================================================
+# 構建產物
+# ============================================================
+build/
+out/
+.next/
+.nuxt/
+.cache/
