@@ -4,10 +4,14 @@ A professional video platform to manage, clip, and synthesize videos from your G
 
 ## Run Locally
 
-**Prerequisites:**  Node.js
+**Prerequisites:**  frontend
 
 1. Install dependencies:
    `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
+2. Run the app:
    `npm run dev`
+
+**Prerequisites:** backend
+
+1. Create ServiceAccount Credentials
+   
