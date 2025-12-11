@@ -3,7 +3,7 @@ import { VideoLibrary } from './components/VideoLibrary';
 import { Player } from './components/Player';
 import { Timeline } from './components/Timeline';
 import { VideoAsset, Clip } from './types';
-import { Video as VideoIcon } from 'lucide-react';
+import { Video as VideoIcon, Download } from 'lucide-react';
 import { fetchFiles, uploadFile, deleteFile, getStreamUrl, GCSFile } from './services/api';
 
 const App: React.FC = () => {
@@ -27,7 +27,7 @@ const App: React.FC = () => {
       fullPath: file.name,
       size: file.size,
       contentType: file.content_type,
-      thumbnail: undefined // 會由 VideoLibrary 自動生成
+      thumbnail: undefined
     };
   };
 
@@ -35,7 +35,6 @@ const App: React.FC = () => {
     setIsLoadingBucket(true);
     try {
       const files = await fetchFiles();
-      //console.log('Fetched files:', files);
       
       const videoFiles = files.filter(file => 
         file.content_type && file.content_type.startsWith('video/')
@@ -45,7 +44,6 @@ const App: React.FC = () => {
         convertToVideoAsset(file, index)
       );
       
-      //console.log('Converted assets:', assets);
       setVideos(assets);
     } catch (err) {
       console.error("Failed to load files", err);
@@ -89,6 +87,29 @@ const App: React.FC = () => {
     } catch (err) {
       alert("Delete failed.");
       console.error(err);
+    }
+  };
+
+  const handleDownloadVideo = async () => {
+    if (!currentVideo) {
+      alert('Please select a video first!');
+      return;
+    }
+
+    try {
+      // 直接使用 stream URL 下載
+      const link = document.createElement('a');
+      link.href = currentVideo.url;
+      link.download = currentVideo.name;
+      link.target = '_blank';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      
+      console.log('Downloading:', currentVideo.name);
+    } catch (err) {
+      console.error('Download failed:', err);
+      alert('Download failed. Please try again.');
     }
   };
 
@@ -141,11 +162,20 @@ const App: React.FC = () => {
           <div className="text-xs text-gray-400 bg-[#222] px-3 py-1 rounded-full border border-[#333]">
             {clips.length} clip{clips.length !== 1 ? 's' : ''}
           </div>
+          
+          {/* Download Current Video 按鈕 */}
           <button 
-            className="bg-[#333] hover:bg-[#444] text-white px-3 py-1.5 rounded text-sm transition"
-            onClick={() => alert('Export feature coming soon!')}
+            className={`flex items-center gap-2 px-4 py-1.5 rounded text-sm transition ${
+              currentVideo 
+                ? 'bg-blue-600 hover:bg-blue-500 text-white' 
+                : 'bg-[#333] text-gray-500 cursor-not-allowed'
+            }`}
+            onClick={handleDownloadVideo}
+            disabled={!currentVideo}
+            title={currentVideo ? `Download ${currentVideo.name}` : 'No video selected'}
           >
-            Export Project
+            <Download className="w-4 h-4" />
+            Download Video
           </button>
         </div>
       </header>
@@ -162,9 +192,8 @@ const App: React.FC = () => {
           isUploading={isUploading}
         />
 
-        {/* Right: Player & Timeline - 使用 flex-col 垂直排列 */}
+        {/* Right: Player & Timeline */}
         <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-          {/* Player - 使用 flex-1 佔據剩餘空間 */}
           <div className="flex-1 min-h-0 flex flex-col">
             <Player 
               video={currentVideo} 
@@ -172,7 +201,6 @@ const App: React.FC = () => {
             />
           </div>
           
-          {/* Timeline - 固定高度由內部控制 */}
           <Timeline 
             clips={clips} 
             assets={assetMap}
