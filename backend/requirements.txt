@@ -33,6 +33,7 @@ pyasn1_modules==0.4.2
 pycparser==2.23
 pydantic==2.12.5
 pydantic_core==2.41.5
+pydantic-settings==2.1.0
 pyparsing==3.2.5
 python-dotenv==1.0.0
 python-jose==3.5.0
@@ -53,3 +54,6 @@ watchfiles==1.1.1
 websockets==15.0.1
 Pillow==10.1.0
 python-dotenv==1.0.0
+ffmpeg-python==0.2.0
+redis==5.0.1
+celery==5.3.4
