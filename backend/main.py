@@ -58,7 +58,8 @@ app = FastAPI(
     title="CloudStream Studio API",
     description="影片流媒體管理系統",
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    docs_url="/docs",
 )
 
 # CORS 中間件
@@ -67,7 +68,7 @@ app.add_middleware(
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*"], 
 )
 
 
@@ -85,11 +86,11 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 # ==================== 路由 ====================
 
-app.include_router(video.router, tags=["Video"])
-app.include_router(tasks.router, tags=["Tasks"])
-app.include_router(files.router, tags=["Files"])
-app.include_router(stream.router, tags=["Stream"])
-app.include_router(thumb.router, tags=["Thumbnails"])
+app.include_router(video.router)
+app.include_router(tasks.router)
+app.include_router(files.router)
+app.include_router(stream.router)
+app.include_router(thumb.router)
 
 
 # ==================== 健康檢查 ====================
