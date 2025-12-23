@@ -20,6 +20,13 @@ export const Player: React.FC<PlayerProps> = ({
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const scrubberRef = useRef<HTMLDivElement>(null);
+  
+  // ✅ Refs to prevent loops
+  const isUpdatingTimeRef = useRef(false);
+  const lastUpdateTimeRef = useRef(0);
+  const lastBufferUpdate = useRef(0);
+  const lastNetworkUpdate = useRef(0);
+  
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -27,7 +34,6 @@ export const Player: React.FC<PlayerProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   
-  // ✅ 新增：緩衝狀態追蹤
   const [bufferProgress, setBufferProgress] = useState(0);
   const [isBuffering, setIsBuffering] = useState(false);
   const [networkSpeed, setNetworkSpeed] = useState<number | null>(null);
@@ -45,12 +51,12 @@ export const Player: React.FC<PlayerProps> = ({
   const [isDraggingScrubber, setIsDraggingScrubber] = useState(false);
   const [dragStartPosition, setDragStartPosition] = useState<{ x: number; y: number } | null>(null);
 
-  const roundToPrecision = (value: number, precision: number = 3): number => {
+  const roundToPrecision = useCallback((value: number, precision: number = 3): number => {
     const multiplier = Math.pow(10, precision);
     return Math.round(value * multiplier) / multiplier;
-  };
+  }, []);
 
-  const formatTime = (t: number): string => {
+  const formatTime = useCallback((t: number): string => {
     if (!isFinite(t)) return '0:00.000';
     
     const mins = Math.floor(t / 60);
@@ -58,9 +64,9 @@ export const Player: React.FC<PlayerProps> = ({
     const ms = Math.round((t % 1) * 1000);
     
     return `${mins}:${secs.toString().padStart(2, '0')}.${ms.toString().padStart(3, '0')}`;
-  };
+  }, []);
 
-  const parseTimeString = (timeStr: string): number => {
+  const parseTimeString = useCallback((timeStr: string): number => {
     try {
       const parts = timeStr.split(':');
       if (parts.length !== 2) return 0;
@@ -75,166 +81,164 @@ export const Player: React.FC<PlayerProps> = ({
     } catch {
       return 0;
     }
-  };
+  }, [roundToPrecision]);
 
-  // ✅ 新增：監控網路速度
+  // ✅ 監控網路速度 - 優化版本
   useEffect(() => {
     if (!videoRef.current || !video) return;
 
     const startTime = performance.now();
     let bytesLoaded = 0;
+    let isMounted = true;
 
     const updateNetworkSpeed = () => {
-      if (!videoRef.current) return;
+      if (!isMounted || !videoRef.current) return;
 
-      const video = videoRef.current;
+      // ✅ 限制更新頻率
+      const now = Date.now();
+      if (now - lastNetworkUpdate.current < 2000) return;
+      lastNetworkUpdate.current = now;
+
+      const videoElement = videoRef.current;
       
-      // 計算已下載的 bytes
-      if (video.buffered.length > 0) {
-        const bufferedEnd = video.buffered.end(video.buffered.length - 1);
-        const estimatedBytes = bufferedEnd * (video.duration > 0 ? (video.videoWidth * video.videoHeight * 0.5) : 1000000);
+      if (videoElement.buffered.length > 0) {
+        const bufferedEnd = videoElement.buffered.end(videoElement.buffered.length - 1);
+        const estimatedBytes = bufferedEnd * (videoElement.duration > 0 ? (videoElement.videoWidth * videoElement.videoHeight * 0.5) : 1000000);
         
-        const elapsedTime = (performance.now() - startTime) / 1000; // 秒
+        const elapsedTime = (performance.now() - startTime) / 1000;
         
         if (elapsedTime > 0 && estimatedBytes > bytesLoaded) {
           bytesLoaded = estimatedBytes;
-          const speed = (bytesLoaded / elapsedTime) / (1024 * 1024); // MB/s
+          const speed = (bytesLoaded / elapsedTime) / (1024 * 1024);
           setNetworkSpeed(speed);
-          
-          console.log(`📊 網路速度: ${speed.toFixed(2)} MB/s`);
         }
       }
     };
 
-    const intervalId = setInterval(updateNetworkSpeed, 2000);
+    const intervalId = setInterval(updateNetworkSpeed, 3000); // ✅ 降低頻率
     
-    return () => clearInterval(intervalId);
+    return () => {
+      isMounted = false;
+      clearInterval(intervalId);
+    };
   }, [video]);
 
-  // ✅ 新增：監控緩衝進度
+  // ✅ 監控緩衝進度 - 優化版本
   useEffect(() => {
     if (!videoRef.current) return;
 
     const video = videoRef.current;
+    let isMounted = true;
 
     const handleProgress = () => {
-      if (video.buffered.length > 0 && video.duration > 0) {
-        const bufferedEnd = video.buffered.end(video.buffered.length - 1);
-        const bufferedPercent = (bufferedEnd / video.duration) * 100;
-        
-        setBufferProgress(bufferedPercent);
-        
-        // 記錄緩衝進度
-        if (bufferedPercent < 100) {
-          console.log(`📦 緩衝進度: ${bufferedPercent.toFixed(1)}% (${formatTime(bufferedEnd)} / ${formatTime(video.duration)})`);
-        }
-      }
+      if (!isMounted || video.buffered.length === 0 || video.duration === 0) return;
+      
+      // ✅ 限制更新頻率
+      const now = Date.now();
+      if (now - lastBufferUpdate.current < 500) return;
+      lastBufferUpdate.current = now;
+      
+      const bufferedEnd = video.buffered.end(video.buffered.length - 1);
+      const bufferedPercent = (bufferedEnd / video.duration) * 100;
+      
+      setBufferProgress(bufferedPercent);
     };
 
     const handleWaiting = () => {
-      console.log('⏳ 緩衝中...');
-      setIsBuffering(true);
+      if (isMounted) setIsBuffering(true);
     };
 
     const handleCanPlayThrough = () => {
-      console.log('✅ 可以流暢播放');
-      setIsBuffering(false);
+      if (isMounted) setIsBuffering(false);
     };
 
     const handleStalled = () => {
-      console.warn('⚠️ 網路停滯');
-      setIsBuffering(true);
-    };
-
-    const handleSuspend = () => {
-      console.log('⏸️ 下載暫停');
+      if (isMounted) setIsBuffering(true);
     };
 
     video.addEventListener('progress', handleProgress);
     video.addEventListener('waiting', handleWaiting);
     video.addEventListener('canplaythrough', handleCanPlayThrough);
     video.addEventListener('stalled', handleStalled);
-    video.addEventListener('suspend', handleSuspend);
 
     return () => {
+      isMounted = false;
       video.removeEventListener('progress', handleProgress);
       video.removeEventListener('waiting', handleWaiting);
       video.removeEventListener('canplaythrough', handleCanPlayThrough);
       video.removeEventListener('stalled', handleStalled);
-      video.removeEventListener('suspend', handleSuspend);
     };
+  }, []); // ✅ 空依賴，只在 mount 時設置
+
+  // ✅ Reset state when video changes
+  useEffect(() => {
+    if (!video) return;
+    
+    console.log('🎬 載入影片:', video.name);
+    
+    // ✅ 重置所有狀態
+    setError(null);
+    setIsLoading(true);
+    setIsPlaying(false);
+    setCurrentTime(0);
+    setStartPoint(0);
+    setEndPoint(0);
+    setPlaybackRate(1);
+    setBufferProgress(0);
+    setIsBuffering(false);
+    setNetworkSpeed(null);
+    
+    // ✅ 重置 refs
+    lastUpdateTimeRef.current = 0;
+    lastBufferUpdate.current = 0;
+    lastNetworkUpdate.current = 0;
+    
+    if (videoRef.current) {
+      const videoElement = videoRef.current;
+      videoElement.preload = 'auto';
+      videoElement.currentTime = 0;
+      videoElement.playbackRate = 1;
+      videoElement.load();
+    }
   }, [video]);
 
-  // Reset state when video changes
+  // ✅ 預覽時間點
   useEffect(() => {
-    if (video) {
-      console.log('🎬 載入影片:', video.name);
-      setError(null);
-      setIsLoading(true);
-      setIsPlaying(false);
-      setCurrentTime(0);
-      setStartPoint(0);
-      setEndPoint(video.duration || 0);
-      setPlaybackRate(1);
-      setBufferProgress(0);
-      setIsBuffering(false);
-      setNetworkSpeed(null);
-      
+    if (!previewTime || !videoRef.current || duration === 0) return;
+    
+    console.log('🎯 應用預覽時間點:', previewTime);
+    
+    setStartPoint(previewTime.start);
+    setEndPoint(previewTime.end);
+    
+    videoRef.current.currentTime = previewTime.start;
+    
+    const playTimeout = setTimeout(() => {
       if (videoRef.current) {
-        const videoElement = videoRef.current;
-        
-        // ✅ 設定預載策略
-        videoElement.preload = 'auto';  // 自動預載
-        
-        // ✅ 設定更激進的緩衝策略（如果瀏覽器支援）
-        if ('buffered' in videoElement) {
-          console.log('📥 啟用自動預載模式');
-        }
-        
-        videoElement.currentTime = 0;
-        videoElement.playbackRate = 1;
-        videoElement.load();
-        
-        console.log('📊 影片資訊:', {
-          url: video.url,
-          size: video.size ? `${(video.size / 1024 / 1024).toFixed(2)} MB` : '未知',
-          type: video.contentType
-        });
+        videoRef.current.play()
+          .then(() => setIsPlaying(true))
+          .catch(console.error);
       }
-    }
-  }, [video]);
-
-  // 當收到預覽時間點時，自動設置並播放
-  useEffect(() => {
-    if (previewTime && videoRef.current && duration > 0) {
-      console.log('🎯 應用預覽時間點:', previewTime);
-      
-      setStartPoint(previewTime.start);
-      setEndPoint(previewTime.end);
-      
-      videoRef.current.currentTime = previewTime.start;
-      setCurrentTime(previewTime.start);
-      
-      videoRef.current.play()
-        .then(() => {
-          setIsPlaying(true);
-          console.log('✅ 預覽播放已開始');
-        })
-        .catch((err) => {
-          console.error('❌ 預覽播放失敗:', err);
-        });
-    }
+    }, 100);
+    
+    return () => clearTimeout(playTimeout);
   }, [previewTime, duration]);
 
-  // 當 startPoint 改變時，將播放頭移到 start 位置
+  // ✅ 當 startPoint 改變時 - 不更新 state
   useEffect(() => {
-    if (videoRef.current && !isDraggingStart && !isDraggingEnd && !isDraggingScrubber) {
+    if (!videoRef.current || isDraggingStart || isDraggingEnd || isDraggingScrubber) return;
+    
+    const now = Date.now();
+    if (now - lastUpdateTimeRef.current < 100) return;
+    lastUpdateTimeRef.current = now;
+    
+    if (Math.abs(videoRef.current.currentTime - startPoint) > 0.01) {
       videoRef.current.currentTime = startPoint;
-      setCurrentTime(startPoint);
+      // ✅ 不調用 setCurrentTime，讓 timeupdate 事件自然觸發
     }
-  }, [startPoint]);
+  }, [startPoint, isDraggingStart, isDraggingEnd, isDraggingScrubber]);
 
-  // 監控播放進度，確保只在藍色區間內播放
+  // ✅ 監控播放進度
   useEffect(() => {
     if (!videoRef.current || !isPlaying) return;
 
@@ -246,32 +250,30 @@ export const Player: React.FC<PlayerProps> = ({
       if (current >= endPoint) {
         videoRef.current.pause();
         videoRef.current.currentTime = startPoint;
-        setCurrentTime(startPoint);
         setIsPlaying(false);
       }
       
       if (current < startPoint) {
         videoRef.current.currentTime = startPoint;
-        setCurrentTime(startPoint);
       }
     };
 
-    const intervalId = setInterval(checkPlaybackBounds, 50);
+    const intervalId = setInterval(checkPlaybackBounds, 100);
     return () => clearInterval(intervalId);
   }, [isPlaying, startPoint, endPoint]);
 
-  // 處理拖曳調整高度
-  const handleResizeStart = (e: React.MouseEvent) => {
+  // ✅ 處理拖曳調整高度
+  const handleResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     setIsResizing(true);
     resizeStartY.current = e.clientY;
     resizeStartHeight.current = controlsHeight;
-  };
+  }, [controlsHeight]);
 
   useEffect(() => {
+    if (!isResizing) return;
+
     const handleResizeMove = (e: MouseEvent) => {
-      if (!isResizing) return;
-      
       const deltaY = resizeStartY.current - e.clientY;
       const newHeight = Math.max(150, Math.min(600, resizeStartHeight.current + deltaY));
       setControlsHeight(newHeight);
@@ -281,56 +283,57 @@ export const Player: React.FC<PlayerProps> = ({
       setIsResizing(false);
     };
 
-    if (isResizing) {
-      document.addEventListener('mousemove', handleResizeMove);
-      document.addEventListener('mouseup', handleResizeEnd);
-      
-      return () => {
-        document.removeEventListener('mousemove', handleResizeMove);
-        document.removeEventListener('mouseup', handleResizeEnd);
-      };
-    }
+    document.addEventListener('mousemove', handleResizeMove);
+    document.addEventListener('mouseup', handleResizeEnd);
+    
+    return () => {
+      document.removeEventListener('mousemove', handleResizeMove);
+      document.removeEventListener('mouseup', handleResizeEnd);
+    };
   }, [isResizing]);
 
-  // 處理時間軸標記拖曳
+  // ✅ 處理時間軸標記拖曳
   useEffect(() => {
+    if (!isDraggingStart && !isDraggingEnd && !isDraggingScrubber) return;
+
+    let animationFrameId: number;
+
     const handleMarkerDrag = (e: MouseEvent) => {
-      if (!scrubberRef.current || (!isDraggingStart && !isDraggingEnd && !isDraggingScrubber)) return;
+      if (!scrubberRef.current) return;
       
-      const rect = scrubberRef.current.getBoundingClientRect();
-      const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
-      const percentage = x / rect.width;
-      const newTime = roundToPrecision(percentage * duration, 3);
-      
-      if (isDraggingStart) {
-        const newStart = Math.min(newTime, endPoint - 0.001);
-        setStartPoint(roundToPrecision(newStart, 3));
-        if (videoRef.current) {
-          videoRef.current.currentTime = newStart;
-          setCurrentTime(newStart);
-        }
-      } else if (isDraggingEnd) {
-        const newEnd = Math.max(newTime, startPoint + 0.001);
-        setEndPoint(roundToPrecision(newEnd, 3));
-      } else if (isDraggingScrubber) {
-        const clampedTime = Math.max(startPoint, Math.min(newTime, endPoint));
-        if (videoRef.current) {
-          videoRef.current.currentTime = clampedTime;
-          setCurrentTime(clampedTime);
-        }
+      if (animationFrameId) {
+        cancelAnimationFrame(animationFrameId);
       }
+      
+      animationFrameId = requestAnimationFrame(() => {
+        if (!scrubberRef.current) return;
+        
+        const rect = scrubberRef.current.getBoundingClientRect();
+        const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
+        const percentage = x / rect.width;
+        const newTime = roundToPrecision(percentage * duration, 3);
+        
+        if (isDraggingStart) {
+          const newStart = Math.min(newTime, endPoint - 0.001);
+          setStartPoint(roundToPrecision(newStart, 3));
+          if (videoRef.current) {
+            videoRef.current.currentTime = newStart;
+          }
+        } else if (isDraggingEnd) {
+          const newEnd = Math.max(newTime, startPoint + 0.001);
+          setEndPoint(roundToPrecision(newEnd, 3));
+        } else if (isDraggingScrubber) {
+          const clampedTime = Math.max(startPoint, Math.min(newTime, endPoint));
+          if (videoRef.current) {
+            videoRef.current.currentTime = clampedTime;
+          }
+        }
+      });
     };
 
-    const handleMarkerDragEnd = (e: MouseEvent) => {
-      if (dragStartPosition && isDraggingStart) {
-        const deltaX = Math.abs(e.clientX - dragStartPosition.x);
-        const deltaY = Math.abs(e.clientY - dragStartPosition.y);
-        
-        if (deltaX < 5 && deltaY < 5 && videoRef.current) {
-          videoRef.current.currentTime = startPoint;
-          setCurrentTime(startPoint);
-          console.log('Clicked Start Marker - Jump to:', startPoint.toFixed(3));
-        }
+    const handleMarkerDragEnd = () => {
+      if (animationFrameId) {
+        cancelAnimationFrame(animationFrameId);
       }
       
       setIsDraggingStart(false);
@@ -339,16 +342,17 @@ export const Player: React.FC<PlayerProps> = ({
       setDragStartPosition(null);
     };
 
-    if (isDraggingStart || isDraggingEnd || isDraggingScrubber) {
-      document.addEventListener('mousemove', handleMarkerDrag);
-      document.addEventListener('mouseup', handleMarkerDragEnd);
-      
-      return () => {
-        document.removeEventListener('mousemove', handleMarkerDrag);
-        document.removeEventListener('mouseup', handleMarkerDragEnd);
-      };
-    }
-  }, [isDraggingStart, isDraggingEnd, isDraggingScrubber, duration, startPoint, endPoint, dragStartPosition]);
+    document.addEventListener('mousemove', handleMarkerDrag);
+    document.addEventListener('mouseup', handleMarkerDragEnd);
+    
+    return () => {
+      if (animationFrameId) {
+        cancelAnimationFrame(animationFrameId);
+      }
+      document.removeEventListener('mousemove', handleMarkerDrag);
+      document.removeEventListener('mouseup', handleMarkerDragEnd);
+    };
+  }, [isDraggingStart, isDraggingEnd, isDraggingScrubber, duration, startPoint, endPoint, roundToPrecision]);
 
   const togglePlay = useCallback(() => {
     if (!videoRef.current) return;
@@ -360,13 +364,10 @@ export const Player: React.FC<PlayerProps> = ({
       const current = videoRef.current.currentTime;
       if (current < startPoint || current >= endPoint) {
         videoRef.current.currentTime = startPoint;
-        setCurrentTime(startPoint);
       }
       
       videoRef.current.play()
-        .then(() => {
-          setIsPlaying(true);
-        })
+        .then(() => setIsPlaying(true))
         .catch((err) => {
           console.error('Play error:', err);
           setError('Failed to play video: ' + err.message);
@@ -375,25 +376,33 @@ export const Player: React.FC<PlayerProps> = ({
     }
   }, [isPlaying, startPoint, endPoint]);
 
-  const handleTimeUpdate = () => {
-    if (videoRef.current) {
-      setCurrentTime(roundToPrecision(videoRef.current.currentTime, 3));
-    }
-  };
+  // ✅ 優化 timeUpdate 處理
+  const handleTimeUpdate = useCallback(() => {
+    if (!videoRef.current || isUpdatingTimeRef.current) return;
+    
+    const newTime = roundToPrecision(videoRef.current.currentTime, 3);
+    
+    // ✅ 只有當時間真的改變時才更新
+    if (Math.abs(newTime - currentTime) < 0.001) return;
+    
+    isUpdatingTimeRef.current = true;
+    
+    requestAnimationFrame(() => {
+      setCurrentTime(newTime);
+      isUpdatingTimeRef.current = false;
+    });
+  }, [roundToPrecision, currentTime]);
 
-  const handleLoadedMetadata = () => {
+  const handleLoadedMetadata = useCallback(() => {
     console.log('📋 影片 metadata 已載入');
     setIsLoading(false);
     
     if (videoRef.current) {
       const dur = roundToPrecision(videoRef.current.duration, 3);
       setDuration(dur);
+      setEndPoint(dur);
       
       console.log(`⏱️ 影片時長: ${formatTime(dur)}`);
-      
-      if (endPoint === 0 || endPoint > dur) {
-        setEndPoint(dur);
-      }
       
       if (autoPlay) {
         videoRef.current.play()
@@ -401,15 +410,15 @@ export const Player: React.FC<PlayerProps> = ({
           .catch(console.error);
       }
     }
-  };
+  }, [autoPlay, formatTime, roundToPrecision]);
 
-  const handleCanPlay = () => {
+  const handleCanPlay = useCallback(() => {
     console.log('✅ 影片可以播放');
     setIsLoading(false);
     setError(null);
-  };
+  }, []);
 
-  const handleError = (e: React.SyntheticEvent<HTMLVideoElement, Event>) => {
+  const handleError = useCallback((e: React.SyntheticEvent<HTMLVideoElement, Event>) => {
     console.error('❌ 影片錯誤:', e);
     setIsLoading(false);
     
@@ -430,8 +439,6 @@ export const Player: React.FC<PlayerProps> = ({
         case MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED:
           errorMessage = 'Video format not supported or source not found';
           break;
-        default:
-          errorMessage = 'Unknown video error';
       }
       
       if (videoElement.error.message) {
@@ -440,17 +447,17 @@ export const Player: React.FC<PlayerProps> = ({
     }
     
     setError(errorMessage);
-  };
+  }, []);
 
-  const handleSpeedChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleSpeedChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const rate = parseFloat(e.target.value);
     setPlaybackRate(rate);
     if (videoRef.current) {
       videoRef.current.playbackRate = rate;
     }
-  };
+  }, []);
 
-  const handleCreateClip = () => {
+  const handleCreateClip = useCallback(() => {
     if (!video) {
       alert('請先選擇影片');
       return;
@@ -466,8 +473,6 @@ export const Player: React.FC<PlayerProps> = ({
       return;
     }
 
-    const clipDuration = roundToPrecision(endPoint - startPoint, 3);
-    
     const newClip: Clip = {
       id: crypto.randomUUID(),
       sourceVideoId: video.id,
@@ -476,19 +481,12 @@ export const Player: React.FC<PlayerProps> = ({
       endTime: roundToPrecision(endPoint, 3),
     };
     
-    console.log('📌 創建剪輯記錄:', {
-      name: newClip.name,
-      startTime: newClip.startTime,
-      endTime: newClip.endTime,
-      duration: clipDuration
-    });
-    
     onAddClip(newClip);
     
-    console.log(`✅ 剪輯已添加到時間軸 (${formatTime(clipDuration)})`);
-  };
+    console.log(`✅ 剪輯已添加到時間軸`);
+  }, [video, startPoint, endPoint, onAddClip, formatTime, roundToPrecision]);
 
-  const handleTimelineClick = (e: React.MouseEvent) => {
+  const handleTimelineClick = useCallback((e: React.MouseEvent) => {
     if (!scrubberRef.current || !videoRef.current || !duration) return;
     
     const rect = scrubberRef.current.getBoundingClientRect();
@@ -499,8 +497,7 @@ export const Player: React.FC<PlayerProps> = ({
     const clampedTime = Math.max(startPoint, Math.min(clickedTime, endPoint));
     
     videoRef.current.currentTime = clampedTime;
-    setCurrentTime(clampedTime);
-  };
+  }, [duration, startPoint, endPoint, roundToPrecision]);
 
   if (!video) {
     return (
@@ -531,12 +528,11 @@ export const Player: React.FC<PlayerProps> = ({
             setIsPlaying(false);
             if (videoRef.current) {
               videoRef.current.currentTime = startPoint;
-              setCurrentTime(startPoint);
             }
           }}
           onClick={togglePlay}
           playsInline
-          preload="auto"  // ✅ 自動預載
+          preload="auto"
           crossOrigin="anonymous"
         >
           <source src={video.url} type="video/mp4" />
@@ -544,7 +540,7 @@ export const Player: React.FC<PlayerProps> = ({
           Your browser does not support the video tag.
         </video>
         
-        {/* ✅ 載入中 + 緩衝進度 */}
+        {/* Loading & Buffering */}
         {(isLoading || isBuffering) && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/50">
             <div className="flex flex-col items-center gap-3">
@@ -553,31 +549,29 @@ export const Player: React.FC<PlayerProps> = ({
                 {isLoading ? 'Loading video...' : 'Buffering...'}
               </p>
               {bufferProgress > 0 && bufferProgress < 100 && (
-                <div className="w-48 bg-gray-700 rounded-full h-2 overflow-hidden">
-                  <div 
-                    className="bg-blue-500 h-full transition-all duration-300"
-                    style={{ width: `${bufferProgress}%` }}
-                  ></div>
-                </div>
-              )}
-              {bufferProgress > 0 && (
-                <p className="text-xs text-gray-400">
-                  {bufferProgress.toFixed(1)}% buffered
-                </p>
+                <>
+                  <div className="w-48 bg-gray-700 rounded-full h-2 overflow-hidden">
+                    <div 
+                      className="bg-blue-500 h-full transition-all duration-300"
+                      style={{ width: `${bufferProgress}%` }}
+                    ></div>
+                  </div>
+                  <p className="text-xs text-gray-400">
+                    {bufferProgress.toFixed(1)}% buffered
+                  </p>
+                </>
               )}
             </div>
           </div>
         )}
         
+        {/* Error Display */}
         {error && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/80 p-8">
             <div className="max-w-md bg-red-900/30 border border-red-500 rounded-lg p-6 text-center">
               <AlertCircle className="w-12 h-12 text-red-500 mx-auto mb-4" />
               <h3 className="text-white text-lg font-semibold mb-2">Video Error</h3>
               <p className="text-red-200 text-sm mb-4">{error}</p>
-              <div className="text-xs text-gray-400 font-mono break-all mb-4">
-                Source: {video.url}
-              </div>
               <button
                 onClick={() => {
                   setError(null);
@@ -593,6 +587,7 @@ export const Player: React.FC<PlayerProps> = ({
           </div>
         )}
         
+        {/* Play/Pause Overlay */}
         {!error && !isLoading && (
           <div 
             className={`absolute inset-0 flex items-center justify-center bg-black/20 cursor-pointer transition-opacity duration-200 ${
@@ -610,8 +605,8 @@ export const Player: React.FC<PlayerProps> = ({
           </div>
         )}
 
-        {/* ✅ 網路速度指示器 */}
-        {networkSpeed !== null && (
+        {/* Network Speed Indicator */}
+        {networkSpeed !== null && networkSpeed > 0 && (
           <div className="absolute top-4 right-4 bg-black/70 backdrop-blur px-3 py-2 rounded-lg flex items-center gap-2 text-xs">
             <Wifi className={`w-4 h-4 ${networkSpeed > 1 ? 'text-green-400' : networkSpeed > 0.5 ? 'text-yellow-400' : 'text-red-400'}`} />
             <span className="text-white font-mono">
@@ -640,7 +635,7 @@ export const Player: React.FC<PlayerProps> = ({
         style={{ height: `${controlsHeight}px` }}
       >
         
-        {/* Scrubber & Clipping Markers */}
+        {/* Timeline */}
         <div 
           ref={scrubberRef} 
           className="relative h-12 flex items-center shrink-0"
@@ -650,7 +645,7 @@ export const Player: React.FC<PlayerProps> = ({
             }
           }}
         >
-          {/* ✅ 緩衝進度條 */}
+          {/* Buffer Progress */}
           {bufferProgress > 0 && duration > 0 && (
             <div 
               className="absolute h-2 bg-gray-600/50 rounded"
@@ -661,8 +656,10 @@ export const Player: React.FC<PlayerProps> = ({
             ></div>
           )}
 
+          {/* Timeline Track */}
           <div className="timeline-track absolute left-0 right-0 h-2 bg-[#333] rounded pointer-events-auto"></div>
 
+          {/* Selected Range */}
           {duration > 0 && (
             <div 
               className="absolute h-2 bg-blue-600/60 rounded cursor-pointer pointer-events-auto"
@@ -677,6 +674,7 @@ export const Player: React.FC<PlayerProps> = ({
             ></div>
           )}
 
+          {/* Playhead */}
           {duration > 0 && currentTime >= startPoint && currentTime <= endPoint && (
             <div 
               className={`absolute w-0.5 h-8 bg-white z-20 cursor-ew-resize group/playhead transition-all ${
@@ -714,6 +712,7 @@ export const Player: React.FC<PlayerProps> = ({
             </div>
           )}
 
+          {/* Start Marker */}
           {duration > 0 && (
             <div 
               className="absolute w-4 h-8 bg-blue-500 rounded-l cursor-ew-resize z-30 flex items-center justify-center group hover:bg-blue-400 active:bg-blue-600 transition-colors"
@@ -736,11 +735,12 @@ export const Player: React.FC<PlayerProps> = ({
             >
               <div className="w-0.5 h-4 bg-white/50"></div>
               <div className="absolute -top-8 bg-blue-600 text-white text-[10px] px-2 py-1 rounded opacity-0 group-hover:opacity-100 whitespace-nowrap pointer-events-none shadow-lg">
-                Start: {formatTime(startPoint)} • Click to jump
+                Start: {formatTime(startPoint)}
               </div>
             </div>
           )}
 
+          {/* End Marker */}
           {duration > 0 && (
             <div 
               className="absolute w-4 h-8 bg-blue-500 rounded-r cursor-ew-resize z-30 flex items-center justify-center group hover:bg-blue-400 active:bg-blue-600 transition-colors"
@@ -766,7 +766,7 @@ export const Player: React.FC<PlayerProps> = ({
           )}
         </div>
 
-        {/* Precision Controls */}
+        {/* Controls */}
         <div className="flex justify-between items-start shrink-0 gap-4">
           <div className="flex flex-col gap-3">
             <div className="flex gap-4 items-center">
@@ -782,7 +782,6 @@ export const Player: React.FC<PlayerProps> = ({
                 {formatTime(currentTime)} <span className="text-gray-600">/</span> {formatTime(duration)}
               </div>
 
-              {/* ✅ 緩衝狀態指示 */}
               {bufferProgress > 0 && bufferProgress < 100 && (
                 <div className="text-xs text-gray-500 shrink-0">
                   ({bufferProgress.toFixed(0)}% buffered)
