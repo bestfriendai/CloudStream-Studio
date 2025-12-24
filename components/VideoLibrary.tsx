@@ -10,11 +10,16 @@ interface VideoLibraryProps {
   onDelete: (video: VideoAsset) => void;
   isLoading: boolean;
   isUploading: boolean;
-  videoStatuses?: Record<string, string>; // ✅ 影片狀態（準備中/就緒）
+  videoStatuses?: Record<string, string>;
 }
 
-const ITEMS_PER_PAGE = 12; // 每頁顯示 12 個影片
+const ITEMS_PER_PAGE = 12;
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+
+// ✅ 最佳化任務超時時間 (5 分鐘)
+const OPTIMIZE_TIMEOUT = 5 * 60 * 1000;
+// ✅ 輪詢間隔
+const POLL_INTERVAL = 3000;
 
 export const VideoLibrary: React.FC<VideoLibraryProps> = ({
   videos,
@@ -31,12 +36,26 @@ export const VideoLibrary: React.FC<VideoLibraryProps> = ({
   const [loadingThumbnails, setLoadingThumbnails] = useState<Set<string>>(new Set());
   const [currentPage, setCurrentPage] = useState(1);
   const [optimizingVideos, setOptimizingVideos] = useState<Set<string>>(new Set());
-
-  // 追蹤已請求縮圖的影片
-  const requestedThumbnails = useRef<Set<string>>(new Set());
   
-  // 儲存影片卡片的 refs
+  // ✅ 追蹤進行中的輪詢任務，用於清理
+  const pollingTasksRef = useRef<Map<string, { timeoutId: number; aborted: boolean }>>(new Map());
+
+  const requestedThumbnails = useRef<Set<string>>(new Set());
   const videoCardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+
+  // ✅ 組件卸載時清理所有輪詢
+  useEffect(() => {
+    return () => {
+      pollingTasksRef.current.forEach((task, taskId) => {
+        task.aborted = true;
+        if (task.timeoutId) {
+          clearTimeout(task.timeoutId);
+        }
+        console.log(`🧹 清理輪詢任務: ${taskId}`);
+      });
+      pollingTasksRef.current.clear();
+    };
+  }, []);
 
   // ==================== 分頁計算 ====================
   const totalPages = Math.ceil(videos.length / ITEMS_PER_PAGE);
@@ -46,7 +65,6 @@ export const VideoLibrary: React.FC<VideoLibraryProps> = ({
     return videos.slice(startIndex, endIndex);
   }, [videos, currentPage]);
 
-  // 當影片列表改變時，調整頁碼
   useEffect(() => {
     if (currentPage > totalPages && totalPages > 0) {
       setCurrentPage(totalPages);
@@ -55,7 +73,6 @@ export const VideoLibrary: React.FC<VideoLibraryProps> = ({
 
   // ==================== 縮圖生成 ====================
   const generateThumbnail = useCallback(async (video: VideoAsset) => {
-    // 如果已經有縮圖、正在載入、或已經請求過，跳過
     if (
       thumbnails[video.id] || 
       loadingThumbnails.has(video.id) ||
@@ -64,7 +81,6 @@ export const VideoLibrary: React.FC<VideoLibraryProps> = ({
       return;
     }
 
-    // 標記為已請求
     requestedThumbnails.current.add(video.id);
     setLoadingThumbnails(prev => new Set(prev).add(video.id));
 
@@ -94,7 +110,6 @@ export const VideoLibrary: React.FC<VideoLibraryProps> = ({
     }
   }, [thumbnails, loadingThumbnails]);
 
-  // 重新產生縮圖
   const handleRegenerateThumbnail = useCallback(async (e: React.MouseEvent, video: VideoAsset) => {
     e.stopPropagation();
     
@@ -165,28 +180,134 @@ export const VideoLibrary: React.FC<VideoLibraryProps> = ({
     });
   }, [videos]);
 
-  // ==================== 影片最佳化 ====================
-  const handleOptimize = async (e: React.MouseEvent, video: VideoAsset) => {
-    e.stopPropagation();
+  // ✅ 修復：安全的輪詢函數
+  const pollOptimizeTask = useCallback((taskId: string, videoId: string) => {
+    const startTime = Date.now();
     
-    try {
-      const videoPath = (video as any).fullPath || video.name;
+    // 初始化任務追蹤
+    pollingTasksRef.current.set(taskId, { timeoutId: 0, aborted: false });
+    
+    const cleanup = () => {
+      const task = pollingTasksRef.current.get(taskId);
+      if (task?.timeoutId) {
+        clearTimeout(task.timeoutId);
+      }
+      pollingTasksRef.current.delete(taskId);
       
-      if (!window.confirm(`最佳化 "${video.name}"？\n\n這將加速影片載入，但需要一些時間處理。`)) {
+      setOptimizingVideos(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(videoId);
+        return newSet;
+      });
+    };
+    
+    const checkStatus = async () => {
+      const task = pollingTasksRef.current.get(taskId);
+      
+      // 檢查是否已被中止
+      if (!task || task.aborted) {
+        console.log(`⏹️ 任務已中止: ${taskId}`);
+        cleanup();
         return;
       }
       
-      console.log('🔧 開始最佳化:', videoPath);
+      // 檢查超時
+      if (Date.now() - startTime > OPTIMIZE_TIMEOUT) {
+        console.error(`⏰ 任務超時: ${taskId}`);
+        alert('最佳化任務超時，請稍後重試。');
+        cleanup();
+        return;
+      }
       
-      setOptimizingVideos(prev => new Set(prev).add(video.id));
-      
+      try {
+        const response = await fetch(`${API_BASE}/api/tasks/${taskId}`);
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        
+        const taskData = await response.json();
+        
+        console.log(`📊 最佳化進度: ${(taskData.progress * 100).toFixed(0)}%`);
+        
+        if (taskData.status === 'completed') {
+          console.log('✅ 最佳化完成');
+          alert('✅ 最佳化完成！影片現在載入更快了。');
+          cleanup();
+        } else if (taskData.status === 'failed') {
+          console.error('❌ 最佳化失敗:', taskData.error);
+          alert(`❌ 最佳化失敗: ${taskData.error || '未知錯誤'}`);
+          cleanup();
+        } else {
+          // 繼續輪詢
+          const timeoutId = window.setTimeout(checkStatus, POLL_INTERVAL);
+          
+          // 更新 timeoutId
+          const currentTask = pollingTasksRef.current.get(taskId);
+          if (currentTask) {
+            currentTask.timeoutId = timeoutId;
+          }
+        }
+      } catch (error) {
+        console.error('查詢狀態失敗:', error);
+        
+        // 網路錯誤時重試幾次
+        const retryCount = (pollingTasksRef.current.get(taskId) as any)?.retryCount || 0;
+        
+        if (retryCount < 3) {
+          console.log(`🔄 重試 (${retryCount + 1}/3)...`);
+          const currentTask = pollingTasksRef.current.get(taskId);
+          if (currentTask) {
+            (currentTask as any).retryCount = retryCount + 1;
+            const timeoutId = window.setTimeout(checkStatus, POLL_INTERVAL * 2);
+            currentTask.timeoutId = timeoutId;
+          }
+        } else {
+          alert('查詢最佳化狀態失敗，請稍後檢查。');
+          cleanup();
+        }
+      }
+    };
+    
+    // 開始輪詢
+    checkStatus();
+  }, []);
+
+  // ✅ 修復：最佳化處理函數
+  const handleOptimize = useCallback(async (e: React.MouseEvent, video: VideoAsset) => {
+    e.stopPropagation();
+    
+    const videoPath = (video as any).fullPath || video.name;
+    
+    // 檢查是否已在最佳化中
+    if (optimizingVideos.has(video.id)) {
+      alert('此影片正在最佳化中，請稍候...');
+      return;
+    }
+    
+    if (!window.confirm(`最佳化 "${video.name}"？\n\n這將加速影片載入，但需要一些時間處理。`)) {
+      return;
+    }
+    
+    console.log('🔧 開始最佳化:', videoPath);
+    
+    // 先設置狀態
+    setOptimizingVideos(prev => new Set(prev).add(video.id));
+    
+    try {
       const response = await fetch(
         `${API_BASE}/api/videos/optimize/${encodeURIComponent(videoPath)}`,
-        { method: 'POST' }
+        { 
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        }
       );
       
       if (!response.ok) {
-        throw new Error('最佳化失敗');
+        const errorText = await response.text();
+        throw new Error(`最佳化請求失敗: ${response.status} - ${errorText}`);
       }
       
       const result = await response.json();
@@ -194,85 +315,54 @@ export const VideoLibrary: React.FC<VideoLibraryProps> = ({
       
       alert('最佳化任務已啟動！\n完成後影片載入速度會更快。');
       
-      // 輪詢任務狀態
+      // 開始輪詢
       pollOptimizeTask(result.task_id, video.id);
       
     } catch (error) {
       console.error('❌ 最佳化失敗:', error);
-      alert('最佳化失敗');
+      alert(`最佳化失敗: ${error instanceof Error ? error.message : '未知錯誤'}`);
+      
+      // 移除最佳化狀態
       setOptimizingVideos(prev => {
         const newSet = new Set(prev);
         newSet.delete(video.id);
         return newSet;
       });
     }
-  };
-
-  const pollOptimizeTask = async (taskId: string, videoId: string) => {
-    const checkStatus = async () => {
-      try {
-        const response = await fetch(`${API_BASE}/api/tasks/${taskId}`);
-        const task = await response.json();
-        
-        console.log(`📊 最佳化進度: ${(task.progress * 100).toFixed(0)}%`);
-        
-        if (task.status === 'completed') {
-          alert('✅ 最佳化完成！影片現在載入更快了。');
-          setOptimizingVideos(prev => {
-            const newSet = new Set(prev);
-            newSet.delete(videoId);
-            return newSet;
-          });
-        } else if (task.status === 'failed') {
-          alert(`❌ 最佳化失敗: ${task.error}`);
-          setOptimizingVideos(prev => {
-            const newSet = new Set(prev);
-            newSet.delete(videoId);
-            return newSet;
-          });
-        } else {
-          setTimeout(checkStatus, 2000);
-        }
-      } catch (error) {
-        console.error('查詢狀態失敗:', error);
-        setOptimizingVideos(prev => {
-          const newSet = new Set(prev);
-          newSet.delete(videoId);
-          return newSet;
-        });
-      }
-    };
-    
-    checkStatus();
-  };
+  }, [optimizingVideos, pollOptimizeTask]);
 
   // ==================== 事件處理 ====================
-  const handleVideoClick = (video: VideoAsset) => {
+  const handleVideoClick = useCallback((video: VideoAsset) => {
     setSelectedVideoId(video.id);
     onSelectVideo(video);
-  };
+  }, [onSelectVideo]);
 
-  const handleUploadClick = () => {
+  const handleUploadClick = useCallback(() => {
     fileInputRef.current?.click();
-  };
+  }, []);
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       onUpload(file);
       e.target.value = '';
     }
-  };
+  }, [onUpload]);
 
-  const handleDelete = (e: React.MouseEvent, video: VideoAsset) => {
+  const handleDelete = useCallback((e: React.MouseEvent, video: VideoAsset) => {
     e.stopPropagation();
     
-    // 檢查是否為 HLS 檔案
     const pathToDelete = (video as any).fullPath || video.name;
     if (pathToDelete.includes('/hls/') || 
         pathToDelete.endsWith('.m3u8') || 
         pathToDelete.endsWith('.ts')) {
       alert('⚠️ 無法刪除 HLS 檔案。請刪除原始影片。');
+      return;
+    }
+    
+    // 檢查是否正在最佳化
+    if (optimizingVideos.has(video.id)) {
+      alert('⚠️ 此影片正在最佳化中，無法刪除。');
       return;
     }
     
@@ -293,17 +383,17 @@ export const VideoLibrary: React.FC<VideoLibraryProps> = ({
         return newThumbnails;
       });
     }
-  };
+  }, [onDelete, selectedVideoId, optimizingVideos]);
 
   // ==================== 工具函數 ====================
-  const formatFileSize = (bytes: number) => {
+  const formatFileSize = useCallback((bytes: number) => {
     if (bytes < 1024) return bytes + ' B';
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
     if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
     return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
-  };
+  }, []);
 
-  const getVideoKey = (video: VideoAsset, index: number): string => {
+  const getVideoKey = useCallback((video: VideoAsset, index: number): string => {
     if (typeof video.id === 'string') {
       return video.id;
     }
@@ -311,12 +401,12 @@ export const VideoLibrary: React.FC<VideoLibraryProps> = ({
       return `${video.name}-${index}`;
     }
     return `video-${index}`;
-  };
+  }, []);
 
-  const goToPage = (page: number) => {
+  const goToPage = useCallback((page: number) => {
     setCurrentPage(Math.max(1, Math.min(page, totalPages)));
     document.querySelector('.video-list-container')?.scrollTo({ top: 0, behavior: 'smooth' });
-  };
+  }, [totalPages]);
 
   // ==================== 渲染 ====================
   return (
@@ -394,7 +484,7 @@ export const VideoLibrary: React.FC<VideoLibraryProps> = ({
                 onClick={() => handleVideoClick(video)}
                 className={`group relative bg-[#222] rounded-lg overflow-hidden cursor-pointer transition-all hover:bg-[#2a2a2a] ${
                   isSelected ? 'ring-2 ring-blue-500 bg-[#2a2a2a]' : ''
-                }`}
+                } ${isOptimizing ? 'opacity-75' : ''}`}
               >
                 {/* Thumbnail */}
                 <div className="relative w-full h-40 bg-black flex items-center justify-center overflow-hidden">
@@ -424,16 +514,16 @@ export const VideoLibrary: React.FC<VideoLibraryProps> = ({
                   )}
 
                   {/* Status Badges */}
-                  {isSelected && (
+                  {isSelected && !isOptimizing && (
                     <div className="absolute top-2 left-2 bg-blue-600 text-white text-xs px-2 py-1 rounded-full font-medium shadow-lg">
                       播放中
                     </div>
                   )}
 
                   {isOptimizing && (
-                    <div className="absolute top-2 left-2 bg-green-600 text-white text-xs px-2 py-1 rounded-full font-medium shadow-lg flex items-center gap-1">
+                    <div className="absolute top-2 left-2 bg-yellow-600 text-white text-xs px-2 py-1 rounded-full font-medium shadow-lg flex items-center gap-1">
                       <Loader2 className="w-3 h-3 animate-spin" />
-                      最佳化中
+                      最佳化中...
                     </div>
                   )}
 
@@ -488,7 +578,7 @@ export const VideoLibrary: React.FC<VideoLibraryProps> = ({
                   )}
                   
                   {/* Regenerate Thumbnail */}
-                  {thumbnail && (
+                  {thumbnail && !isOptimizing && (
                     <button
                       onClick={(e) => handleRegenerateThumbnail(e, video)}
                       className="p-1.5 bg-black/50 hover:bg-blue-600 rounded transition-colors"
@@ -499,13 +589,15 @@ export const VideoLibrary: React.FC<VideoLibraryProps> = ({
                   )}
                   
                   {/* Delete Button */}
-                  <button
-                    onClick={(e) => handleDelete(e, video)}
-                    className="p-1.5 bg-black/50 hover:bg-red-600 rounded transition-colors"
-                    title="刪除影片"
-                  >
-                    <Trash2 className="w-4 h-4 text-white" />
-                  </button>
+                  {!isOptimizing && (
+                    <button
+                      onClick={(e) => handleDelete(e, video)}
+                      className="p-1.5 bg-black/50 hover:bg-red-600 rounded transition-colors"
+                      title="刪除影片"
+                    >
+                      <Trash2 className="w-4 h-4 text-white" />
+                    </button>
+                  )}
                 </div>
               </div>
             );

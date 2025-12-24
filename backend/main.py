@@ -65,10 +65,19 @@ app = FastAPI(
 # CORS 中間件
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"], 
+    allow_headers=["*"],
+    expose_headers=[
+        "Content-Range",
+        "Accept-Ranges", 
+        "Content-Length",
+        "Content-Type",
+        "X-Cache",
+        "X-Response-Time"
+    ],
+    max_age=3600
 )
 
 

@@ -9,6 +9,7 @@ import tempfile
 import os
 import shutil
 import logging
+import subprocess
 
 router = APIRouter(prefix="/api/videos", tags=["Video Processing"])
 logger = logging.getLogger(__name__)
@@ -294,7 +295,7 @@ async def process_optimize_task(task_id: str, video_path: str):
             message="下載影片..."
         )
         
-        logger.info(f"🔧 [Task {task_id}] 開始最佳化")
+        logger.info(f"🔧 [Task {task_id}] 開始最佳化: {video_path}")
         
         temp_dir = tempfile.mkdtemp(prefix="optimize_")
         local_input = os.path.join(temp_dir, "input.mp4")
@@ -337,8 +338,20 @@ async def process_optimize_task(task_id: str, video_path: str):
             message="上傳最佳化版本..."
         )
         
-        # 上傳回 GCS（覆蓋原檔案）
+        # ✅ 上傳回 GCS（覆蓋原檔案）
         gcs_service.upload_file(local_output, video_path)
+        
+        # ✅ 清除 GCS metadata 快取
+        from services.gcs_cache import get_connection_pool
+        gcs_pool = get_connection_pool()
+        gcs_pool.invalidate_metadata_cache(settings.GCS_BUCKET_NAME, video_path)
+        logger.info(f"   ✅ 已清除 metadata 快取: {video_path}")
+        
+        # ✅ 清除影片快取
+        from services.video_cache import get_video_cache
+        video_cache = get_video_cache()
+        video_cache.invalidate(video_path)
+        logger.info(f"   ✅ 已清除影片快取: {video_path}")
         
         # 獲取檔案資訊
         optimized_info = ffmpeg_service.get_video_info(local_output)

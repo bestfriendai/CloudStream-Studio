@@ -19,7 +19,6 @@ export const Player: React.FC<PlayerProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const scrubberRef = useRef<HTMLDivElement>(null);
   
-  // ✅ 使用 ref 追蹤拖曳狀態，避免 Effect 依賴
   const isDraggingRef = useRef(false);
   const currentTimeRef = useRef(0);
   const lastBufferUpdate = useRef(0);
@@ -44,7 +43,6 @@ export const Player: React.FC<PlayerProps> = ({
   const [startPoint, setStartPoint] = useState(0);
   const [endPoint, setEndPoint] = useState(0);
   
-  // ✅ 簡化拖曳狀態 - 使用單一狀態
   const [dragType, setDragType] = useState<'start' | 'end' | 'scrubber' | null>(null);
 
   const roundToPrecision = useCallback((value: number, precision: number = 3): number => {
@@ -168,7 +166,7 @@ export const Player: React.FC<PlayerProps> = ({
   useEffect(() => {
     if (!video) return;
     
-    console.log('🎬 載入影片:', video.name);
+    console.log('🎬 載入影片:', video.name, 'URL:', video.url);
     
     setError(null);
     setIsLoading(true);
@@ -194,7 +192,7 @@ export const Player: React.FC<PlayerProps> = ({
     }
   }, [video]);
 
-  // ✅ 預覽時間點 - 簡化邏輯
+  // ✅ 預覽時間點
   useEffect(() => {
     if (!previewTime || !videoRef.current || duration === 0) return;
     
@@ -218,7 +216,7 @@ export const Player: React.FC<PlayerProps> = ({
     return () => clearTimeout(playTimeout);
   }, [previewTime, duration]);
 
-  // ✅ 監控播放進度 - 檢查邊界
+  // ✅ 監控播放進度
   useEffect(() => {
     if (!videoRef.current || !isPlaying) return;
 
@@ -270,7 +268,7 @@ export const Player: React.FC<PlayerProps> = ({
     };
   }, [isResizing]);
 
-  // ✅ 核心修復：統一的拖曳處理
+  // ✅ 統一的拖曳處理
   useEffect(() => {
     if (!dragType) {
       isDraggingRef.current = false;
@@ -311,7 +309,6 @@ export const Player: React.FC<PlayerProps> = ({
       isDraggingRef.current = false;
     };
 
-    // ✅ 使用 passive: false 防止滾動
     document.addEventListener('mousemove', handleMouseMove, { passive: false });
     document.addEventListener('mouseup', handleMouseUp);
     
@@ -345,13 +342,11 @@ export const Player: React.FC<PlayerProps> = ({
     }
   }, [isPlaying, startPoint, endPoint]);
 
-  // ✅ 修復 handleTimeUpdate - 拖曳時跳過
   const handleTimeUpdate = useCallback(() => {
     if (!videoRef.current || isDraggingRef.current) return;
     
     const newTime = roundToPrecision(videoRef.current.currentTime, 3);
     
-    // 避免微小變化觸發更新
     if (Math.abs(newTime - currentTimeRef.current) < 0.05) return;
     
     currentTimeRef.current = newTime;
@@ -361,6 +356,7 @@ export const Player: React.FC<PlayerProps> = ({
   const handleLoadedMetadata = useCallback(() => {
     console.log('📋 影片 metadata 已載入');
     setIsLoading(false);
+    setError(null); // ✅ 清除之前的錯誤
     
     if (videoRef.current) {
       const dur = roundToPrecision(videoRef.current.duration, 3);
@@ -383,35 +379,79 @@ export const Player: React.FC<PlayerProps> = ({
     setError(null);
   }, []);
 
-  const handleError = useCallback((e: React.SyntheticEvent<HTMLVideoElement, Event>) => {
-    console.error('❌ 影片錯誤:', e);
+  // ✅ 修復：正確處理 video 元素的錯誤
+  const handleVideoError = useCallback(() => {
+    // 直接從 videoRef 獲取錯誤資訊
+    const videoElement = videoRef.current;
+    
+    if (!videoElement) {
+      console.error('❌ 影片錯誤: videoRef 為空');
+      return;
+    }
+    
+    console.error('❌ 影片錯誤:', {
+      error: videoElement.error,
+      networkState: videoElement.networkState,
+      readyState: videoElement.readyState,
+      src: video?.url
+    });
+    
     setIsLoading(false);
     
-    const videoElement = e.currentTarget;
     let errorMessage = 'Failed to load video';
     
     if (videoElement.error) {
       switch (videoElement.error.code) {
         case MediaError.MEDIA_ERR_ABORTED:
-          errorMessage = 'Video loading aborted';
+          errorMessage = 'Video loading was aborted';
           break;
         case MediaError.MEDIA_ERR_NETWORK:
-          errorMessage = 'Network error while loading video';
+          errorMessage = 'Network error while loading video. Please check your connection.';
           break;
         case MediaError.MEDIA_ERR_DECODE:
-          errorMessage = 'Video decoding failed';
+          errorMessage = 'Video decoding failed. The file may be corrupted.';
           break;
         case MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED:
           errorMessage = 'Video format not supported or source not found';
           break;
+        default:
+          errorMessage = `Unknown error (code: ${videoElement.error.code})`;
       }
       
       if (videoElement.error.message) {
-        errorMessage += ': ' + videoElement.error.message;
+        errorMessage += `: ${videoElement.error.message}`;
+      }
+    } else {
+      // 沒有 error 對象時，檢查網路狀態
+      switch (videoElement.networkState) {
+        case HTMLMediaElement.NETWORK_EMPTY:
+          errorMessage = 'Video not initialized';
+          break;
+        case HTMLMediaElement.NETWORK_IDLE:
+          errorMessage = 'Video source not found';
+          break;
+        case HTMLMediaElement.NETWORK_LOADING:
+          errorMessage = 'Video is still loading...';
+          // 可能只是暫時的，不設置錯誤
+          return;
+        case HTMLMediaElement.NETWORK_NO_SOURCE:
+          errorMessage = 'No video source available';
+          break;
       }
     }
     
+    // 添加 URL 資訊以便調試
+    if (video?.url) {
+      console.error('影片 URL:', video.url);
+    }
+    
     setError(errorMessage);
+  }, [video?.url]);
+
+  // ✅ 處理 source 元素錯誤（不觸發主要錯誤狀態）
+  const handleSourceError = useCallback((e: React.SyntheticEvent<HTMLSourceElement>) => {
+    console.warn('⚠️ Source 載入失敗:', e.currentTarget.src);
+    // 不立即設置錯誤，等待所有 source 都失敗後由 video 的 error 事件處理
   }, []);
 
   const handleSpeedChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -451,10 +491,9 @@ export const Player: React.FC<PlayerProps> = ({
     console.log(`✅ 剪輯已添加到時間軸`);
   }, [video, startPoint, endPoint, onAddClip, formatTime, roundToPrecision]);
 
-  // ✅ 點擊時間軸跳轉
   const handleTimelineClick = useCallback((e: React.MouseEvent) => {
     if (!scrubberRef.current || !videoRef.current || !duration) return;
-    if (dragType) return; // 拖曳中不處理點擊
+    if (dragType) return;
     
     const rect = scrubberRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
@@ -468,12 +507,10 @@ export const Player: React.FC<PlayerProps> = ({
     setCurrentTime(clampedTime);
   }, [duration, startPoint, endPoint, roundToPrecision, dragType]);
 
-  // ✅ 開始拖曳的處理函數
   const handleStartDrag = useCallback((type: 'start' | 'end' | 'scrubber') => (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
     
-    // 拖曳時暫停播放
     if (isPlaying && videoRef.current) {
       videoRef.current.pause();
       setIsPlaying(false);
@@ -481,6 +518,17 @@ export const Player: React.FC<PlayerProps> = ({
     
     setDragType(type);
   }, [isPlaying]);
+
+  // ✅ 重試載入影片
+  const handleRetry = useCallback(() => {
+    setError(null);
+    setIsLoading(true);
+    
+    if (videoRef.current && video) {
+      console.log('🔄 重試載入影片:', video.url);
+      videoRef.current.load();
+    }
+  }, [video]);
 
   if (!video) {
     return (
@@ -500,13 +548,14 @@ export const Player: React.FC<PlayerProps> = ({
         className="flex items-center justify-center relative bg-black group"
         style={{ height: `calc(100% - ${controlsHeight}px)` }}
       >
+        {/* ✅ 修復：使用 onError 在 video 元素上，而不是 source */}
         <video
           ref={videoRef}
           className="max-h-full max-w-full outline-none"
           onTimeUpdate={handleTimeUpdate}
           onLoadedMetadata={handleLoadedMetadata}
           onCanPlay={handleCanPlay}
-          onError={handleError}
+          onError={handleVideoError}
           onEnded={() => {
             setIsPlaying(false);
             if (videoRef.current) {
@@ -520,13 +569,17 @@ export const Player: React.FC<PlayerProps> = ({
           preload="auto"
           crossOrigin="anonymous"
         >
-          <source src={video.url} type="video/mp4" />
-          <source src={video.url} type="video/webm" />
+          {/* ✅ 只使用一個 source，根據 content type 決定 */}
+          <source 
+            src={video.url} 
+            type={video.contentType || 'video/mp4'} 
+            onError={handleSourceError}
+          />
           Your browser does not support the video tag.
         </video>
         
         {/* Loading & Buffering */}
-        {(isLoading || isBuffering) && (
+        {(isLoading || isBuffering) && !error && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/50">
             <div className="flex flex-col items-center gap-3">
               <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
@@ -557,17 +610,26 @@ export const Player: React.FC<PlayerProps> = ({
               <AlertCircle className="w-12 h-12 text-red-500 mx-auto mb-4" />
               <h3 className="text-white text-lg font-semibold mb-2">Video Error</h3>
               <p className="text-red-200 text-sm mb-4">{error}</p>
-              <button
-                onClick={() => {
-                  setError(null);
-                  if (videoRef.current) {
-                    videoRef.current.load();
-                  }
-                }}
-                className="bg-red-600 hover:bg-red-500 text-white px-4 py-2 rounded text-sm"
-              >
-                Retry
-              </button>
+              
+              {/* ✅ 顯示影片 URL 以便調試 */}
+              <p className="text-gray-500 text-xs mb-4 break-all">
+                URL: {video.url}
+              </p>
+              
+              <div className="flex gap-2 justify-center">
+                <button
+                  onClick={handleRetry}
+                  className="bg-red-600 hover:bg-red-500 text-white px-4 py-2 rounded text-sm"
+                >
+                  Retry
+                </button>
+                <button
+                  onClick={() => setError(null)}
+                  className="bg-gray-600 hover:bg-gray-500 text-white px-4 py-2 rounded text-sm"
+                >
+                  Dismiss
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -675,7 +737,6 @@ export const Player: React.FC<PlayerProps> = ({
                 {formatTime(currentTime)}
               </div>
               
-              {/* 擴大點擊區域 */}
               <div className="absolute -left-4 -right-4 -top-4 -bottom-4 cursor-ew-resize"></div>
             </div>
           )}
@@ -694,7 +755,6 @@ export const Player: React.FC<PlayerProps> = ({
               <div className="absolute -top-8 bg-blue-600 text-white text-[10px] px-2 py-1 rounded opacity-0 group-hover/start:opacity-100 whitespace-nowrap pointer-events-none shadow-lg">
                 Start: {formatTime(startPoint)}
               </div>
-              {/* 擴大點擊區域 */}
               <div className="absolute -left-2 -right-2 -top-2 -bottom-2 cursor-ew-resize"></div>
             </div>
           )}
@@ -713,7 +773,6 @@ export const Player: React.FC<PlayerProps> = ({
               <div className="absolute -top-8 bg-blue-600 text-white text-[10px] px-2 py-1 rounded opacity-0 group-hover/end:opacity-100 whitespace-nowrap pointer-events-none shadow-lg">
                 End: {formatTime(endPoint)}
               </div>
-              {/* 擴大點擊區域 */}
               <div className="absolute -left-2 -right-2 -top-2 -bottom-2 cursor-ew-resize"></div>
             </div>
           )}
@@ -741,7 +800,6 @@ export const Player: React.FC<PlayerProps> = ({
                 </div>
               )}
               
-              {/* 拖曳狀態指示 */}
               {dragType && (
                 <div className="text-xs text-blue-400 bg-blue-900/30 px-2 py-1 rounded">
                   拖曳中: {dragType === 'start' ? '起點' : dragType === 'end' ? '終點' : '播放針'}

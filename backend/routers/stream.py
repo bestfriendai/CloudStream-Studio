@@ -4,6 +4,7 @@ from services.gcs_service import GCSService
 from services.gcs_cache import get_connection_pool, get_pool_status
 from services.video_cache import get_video_cache
 from config import get_settings
+import mimetypes
 import logging
 import time
 from typing import Optional
@@ -52,228 +53,173 @@ def parse_range_header(range_header: str, file_size: int) -> tuple:
     
     return start, end, content_length
 
+def get_content_type(filename: str) -> str:
+    """根據檔案副檔名判斷 Content-Type"""
+    content_type, _ = mimetypes.guess_type(filename)
+    if content_type:
+        return content_type
+    
+    # 手動處理常見影片格式
+    ext = filename.lower().split('.')[-1]
+    video_types = {
+        'mp4': 'video/mp4',
+        'webm': 'video/webm',
+        'ogg': 'video/ogg',
+        'mov': 'video/quicktime',
+        'avi': 'video/x-msvideo',
+        'mkv': 'video/x-matroska',
+    }
+    return video_types.get(ext, 'application/octet-stream')
+
+
 # ==================== 影片串流 ====================
+# ✅ GET 路由 - 注意這裡
 @router.get("/stream/{filename:path}")
 async def stream_video(filename: str, request: Request):
-    """
-    串流影片（支援 Range 請求）
-    
-    支援：
-    - HTTP Range requests (部分內容請求)
-    - 快進/快退
-    - 暫停/繼續播放
-    """
+    """串流影片（支援 Range 請求）"""
     try:
-        request_start = time.time()
-        logger.info(f"📺 串流請求: {filename}")
+        logger.info(f"📹 串流請求: {filename}")
         
-        # ✅ 使用快取的 metadata
-        metadata = gcs_pool.get_blob_metadata(settings.GCS_BUCKET_NAME, filename)
-
-        if not metadata:
-            raise HTTPException(status_code=404, detail="Video not found")
+        # 取得 bucket 和 blob
+        bucket = gcs_pool.get_bucket(settings.GCS_BUCKET_NAME)
+        blob = bucket.blob(filename)
         
-        file_size = metadata['size']
-        content_type = metadata.get('content_type', 'video/mp4')
-
         # 檢查檔案是否存在
-        if not gcs_service.file_exists(filename):
-            logger.error(f"❌ 檔案不存在: {filename}")
-            raise HTTPException(status_code=404, detail="Video not found")
+        if not blob.exists():
+            logger.error(f"   ❌ 檔案不存在: {filename}")
+            raise HTTPException(status_code=404, detail="檔案不存在")
         
-        # 獲取檔案元數據
-        metadata = gcs_service.get_file_metadata(filename)
-        file_size = metadata["size"]
-        content_type = metadata.get("content_type") or "video/mp4"
+        # 取得檔案資訊
+        blob.reload()
+        file_size = blob.size
+        content_type = get_content_type(filename)
         
-        logger.info(f"   檔案大小: {file_size:,} bytes ({file_size / 1024 / 1024:.2f} MB)")
+        logger.info(f"   檔案大小: {file_size:,} bytes")
+        logger.info(f"   Content-Type: {content_type}")
         
-        # 檢查是否為 Range 請求
+        # 檢查 Range header
         range_header = request.headers.get("range")
         
-        if range_header:
-            # 處理 Range 請求（部分內容）
-            start, end, content_length = parse_range_header(range_header, file_size)
-            # ✅ 先檢查快取
-            cache_start = time.time()
-            cached_data = video_cache.get(filename, start, end)
-            cache_time = time.time() - cache_start
+        if not range_header:
+            # 完整檔案請求
+            logger.info(f"   📦 完整檔案請求")
             
-            if cached_data:
-                logger.info(f"   🎯 Cache HIT ({cache_time * 1000:.1f}ms)")
-                
-                total_time = time.time() - request_start
-                
-                headers = {
-                    "Content-Range": f"bytes {start}-{end}/{file_size}",
-                    "Accept-Ranges": "bytes",
-                    "Content-Length": str(len(cached_data)),
-                    "Content-Type": content_type,
-                    "Cache-Control": "public, max-age=3600",
-                    "Access-Control-Allow-Origin": "*",
-                    "Access-Control-Expose-Headers": "Content-Range, Accept-Ranges, Content-Length",
-                    "X-Cache": "HIT",
-                    "X-Response-Time": f"{total_time * 1000:.1f}ms"
-                }
-                
-                return Response(
-                    content=cached_data,
-                    status_code=206,
-                    headers=headers
-                )
+            content = blob.download_as_bytes()
             
-            # ✅ 快取未命中，從 GCS 下載
-            logger.info(f"   ❌ Cache MISS, downloading from GCS...")
-            
-            # ✅ 使用連接池獲取 bucket
-            bucket = gcs_pool.get_bucket(settings.GCS_BUCKET_NAME)
-            blob = bucket.blob(filename)
-            
-            try:
-                download_start = time.time()
-                logger.info(f"   🔽 GCS 下載: start={start}, end={end}")
-                
-                chunk = blob.download_as_bytes(start=start, end=end)
-                download_time = time.time() - download_start
-                
-                actual_length = len(chunk)
-                speed = actual_length / download_time / 1024 / 1024 if download_time > 0 else 0
-                
-                logger.info(f"   ✓ 下載完成: {actual_length:,} bytes in {download_time:.2f}s ({speed:.2f} MB/s)")
-                
-                # ✅ 儲存到快取
-                video_cache.set(filename, start, end, chunk)
-                
-                # ✅ 驗證長度（允許 ±1 的誤差，因為 GCS API 行為可能不一致）
-                if abs(actual_length - content_length) > 1:
-                    logger.error(f"   ❌ 長度不符: 預期 {content_length}, 實際 {actual_length}")
-                    raise HTTPException(
-                        status_code=500, 
-                        detail=f"Content length mismatch: expected {content_length}, got {actual_length}"
-                    )
-                
-                # ✅ 如果有輕微差異，調整 Content-Length
-                if actual_length != content_length:
-                    logger.warning(f"   ⚠️ 調整 Content-Length: {content_length} -> {actual_length}")
-                    content_length = actual_length
-                    # 同時調整 end
-                    end = start + actual_length - 1
-                
-            except HTTPException:
-                raise
-            except Exception as e:
-                logger.error(f"❌ 讀取範圍失敗: {e}", exc_info=True)
-                raise HTTPException(status_code=500, detail="Failed to read file range")
-            
-            # 返回 206 Partial Content
-            total_time = time.time() - request_start
-
             headers = {
-                "Content-Range": f"bytes {start}-{end}/{file_size}",
-                "Accept-Ranges": "bytes",
-                "Content-Length": str(content_length),
                 "Content-Type": content_type,
+                "Content-Length": str(len(content)),
+                "Accept-Ranges": "bytes",
                 "Cache-Control": "public, max-age=3600",
                 "Access-Control-Allow-Origin": "*",
-                "Access-Control-Expose-Headers": "Content-Range, Accept-Ranges, Content-Length"
+                "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges",
             }
-            logger.info(f"   ⏱️ 總時間: {total_time:.2f}s")
+            
+            logger.info(f"   ✅ 返回完整檔案: {len(content):,} bytes")
+            
             return Response(
-                content=chunk,
-                status_code=206,
-                headers=headers
-            )
-        
-        else:
-            # 完整檔案請求
-            logger.info(f"   完整檔案請求")
-            
-            bucket = gcs_service.bucket
-            blob = bucket.blob(filename)
-            
-            # 對於小檔案（< 50MB），直接返回
-            if file_size < 50 * 1024 * 1024:
-                logger.info(f"   小檔案，直接返回")
-                
-                try:
-                    content = blob.download_as_bytes()
-                    
-                    actual_length = len(content)
-                    logger.info(f"   ✓ 讀取完成: {actual_length:,} bytes")
-                    
-                    if actual_length != file_size:
-                        logger.warning(f"   ⚠️ 長度不符: 預期 {file_size}, 實際 {actual_length}")
-                        # 使用實際長度
-                        file_size = actual_length
-                    
-                    headers = {
-                        "Content-Length": str(actual_length),
-                        "Content-Type": content_type,
-                        "Accept-Ranges": "bytes",
-                        "Cache-Control": "public, max-age=3600",
-                        "Access-Control-Allow-Origin": "*"
-                    }
-                    
-                    return Response(
-                        content=content,
-                        status_code=200,
-                        headers=headers
-                    )
-                    
-                except Exception as e:
-                    logger.error(f"❌ 讀取檔案失敗: {e}", exc_info=True)
-                    raise HTTPException(status_code=500, detail="Failed to read file")
-            
-            # 對於大檔案，使用串流
-            logger.info(f"   大檔案，使用串流")
-            
-            def iterfile():
-                chunk_size = 2 * 1024 * 1024  # 2MB chunks
-                position = 0
-                
-                while position < file_size:
-                    # 計算這次要讀取的範圍
-                    chunk_start = position
-                    chunk_end = min(position + chunk_size - 1, file_size - 1)  # inclusive
-                    
-                    try:
-                        logger.debug(f"   📦 串流區塊: {chunk_start}-{chunk_end} ({chunk_end - chunk_start + 1} bytes)")
-                        
-                        chunk = blob.download_as_bytes(start=chunk_start, end=chunk_end)
-                        
-                        if len(chunk) == 0:
-                            logger.warning(f"   ⚠️ 空區塊，停止串流")
-                            break
-                        
-                        yield chunk
-                        position = chunk_end + 1  # 移到下一個位置
-                        
-                    except Exception as e:
-                        logger.error(f"❌ 串流區塊失敗: {e}")
-                        break
-            
-            headers = {
-                "Content-Length": str(file_size),
-                "Content-Type": content_type,
-                "Accept-Ranges": "bytes",
-                "Cache-Control": "public, max-age=3600",
-                "Access-Control-Allow-Origin": "*"
-            }
-            
-            return StreamingResponse(
-                iterfile(),
+                content=content,
                 status_code=200,
                 headers=headers,
                 media_type=content_type
             )
         
+        # Range 請求
+        logger.info(f"   📊 Range 請求: {range_header}")
+        
+        range_match = re.match(r'bytes=(\d+)-(\d*)', range_header)
+        if not range_match:
+            logger.error(f"   ❌ 無效的 Range header: {range_header}")
+            raise HTTPException(status_code=400, detail="無效的 Range header")
+        
+        start = int(range_match.group(1))
+        end = int(range_match.group(2)) if range_match.group(2) else file_size - 1
+        
+        if start >= file_size or end >= file_size or start > end:
+            logger.error(f"   ❌ 無效的範圍: {start}-{end} (檔案大小: {file_size})")
+            raise HTTPException(
+                status_code=416,
+                detail="請求的範圍無效",
+                headers={"Content-Range": f"bytes */{file_size}"}
+            )
+        
+        length = end - start + 1
+        logger.info(f"   範圍: {start:,}-{end:,} ({length:,} bytes)")
+        
+        content = blob.download_as_bytes(start=start, end=end + 1)
+        
+        headers = {
+            "Content-Type": content_type,
+            "Content-Length": str(length),
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "public, max-age=3600",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges",
+        }
+        
+        logger.info(f"   ✅ 返回 206 Partial Content: {length:,} bytes")
+        
+        return Response(
+            content=content,
+            status_code=206,
+            headers=headers,
+            media_type=content_type
+        )
+        
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ 串流錯誤: {e}", exc_info=True)
+        logger.error(f"❌ 串流錯誤: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"串流錯誤: {str(e)}")
+
+
+# ✅ HEAD 路由
+@router.head("/stream/{filename:path}")
+async def stream_head(filename: str):
+    """處理 HEAD 請求"""
+    try:
+        bucket = gcs_pool.get_bucket(settings.GCS_BUCKET_NAME)
+        blob = bucket.blob(filename)
+        
+        if not blob.exists():
+            raise HTTPException(status_code=404, detail="檔案不存在")
+        
+        blob.reload()
+        content_type = get_content_type(filename)
+        
+        headers = {
+            "Content-Type": content_type,
+            "Content-Length": str(blob.size),
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "public, max-age=3600",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Expose-Headers": "Content-Length, Accept-Ranges",
+        }
+        
+        return Response(status_code=200, headers=headers)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ HEAD 錯誤: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ✅ OPTIONS 路由（CORS）
+@router.options("/stream/{filename:path}")
+async def stream_options(filename: str):
+    """處理 CORS preflight 請求"""
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+            "Access-Control-Allow-Headers": "Range, Content-Type",
+            "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges",
+            "Access-Control-Max-Age": "3600",
+        }
+    )
 # ==================== HEAD 請求支援 ====================
 @router.head("/stream/{filename:path}")
 async def head_video(filename: str):

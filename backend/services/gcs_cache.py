@@ -1,17 +1,115 @@
-# backend/services/gcs_cache.py
-
 from google.cloud import storage
 from google.oauth2 import service_account
 from google.auth.exceptions import RefreshError
 from google.cloud.exceptions import NotFound
-from functools import lru_cache
 import logging
 import os
+import time
 from typing import Optional, Dict
+from threading import Lock
+from collections import OrderedDict
 from config import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+
+class MetadataCache:
+    """自定義 Metadata 快取，支援單項失效"""
+    
+    def __init__(self, maxsize: int = 1000, ttl: int = 300):
+        """
+        Args:
+            maxsize: 最大快取數量
+            ttl: 快取存活時間（秒）
+        """
+        self._cache: OrderedDict[str, Dict] = OrderedDict()
+        self._lock = Lock()
+        self._maxsize = maxsize
+        self._ttl = ttl
+        self._hits = 0
+        self._misses = 0
+    
+    def get(self, key: str) -> Optional[Dict]:
+        """獲取快取項目"""
+        with self._lock:
+            if key not in self._cache:
+                self._misses += 1
+                return None
+            
+            item = self._cache[key]
+            
+            # 檢查是否過期
+            if time.time() - item['timestamp'] > self._ttl:
+                del self._cache[key]
+                self._misses += 1
+                logger.debug(f"⏰ Cache expired: {key}")
+                return None
+            
+            # 移到最後（LRU）
+            self._cache.move_to_end(key)
+            self._hits += 1
+            
+            return item['data']
+    
+    def set(self, key: str, data: Dict):
+        """設置快取項目"""
+        with self._lock:
+            # 如果已存在，先刪除
+            if key in self._cache:
+                del self._cache[key]
+            
+            # 檢查容量
+            while len(self._cache) >= self._maxsize:
+                self._cache.popitem(last=False)
+            
+            self._cache[key] = {
+                'data': data,
+                'timestamp': time.time()
+            }
+    
+    def invalidate(self, key: str) -> bool:
+        """使特定項目失效"""
+        with self._lock:
+            if key in self._cache:
+                del self._cache[key]
+                logger.info(f"🗑️ Cache invalidated: {key}")
+                return True
+            return False
+    
+    def invalidate_prefix(self, prefix: str) -> int:
+        """使所有符合前綴的項目失效"""
+        with self._lock:
+            keys_to_delete = [k for k in self._cache if k.startswith(prefix)]
+            for key in keys_to_delete:
+                del self._cache[key]
+            
+            if keys_to_delete:
+                logger.info(f"🗑️ Invalidated {len(keys_to_delete)} items with prefix: {prefix}")
+            
+            return len(keys_to_delete)
+    
+    def clear(self):
+        """清除所有快取"""
+        with self._lock:
+            count = len(self._cache)
+            self._cache.clear()
+            self._hits = 0
+            self._misses = 0
+            logger.info(f"🗑️ Cache cleared: {count} items")
+    
+    def get_info(self) -> Dict:
+        """獲取快取統計"""
+        with self._lock:
+            total = self._hits + self._misses
+            return {
+                'hits': self._hits,
+                'misses': self._misses,
+                'maxsize': self._maxsize,
+                'currsize': len(self._cache),
+                'hit_rate': self._hits / total if total > 0 else 0,
+                'ttl': self._ttl
+            }
 
 
 class GCSConnectionPool:
@@ -22,6 +120,10 @@ class GCSConnectionPool:
         self._bucket: Optional[storage.Bucket] = None
         self._credentials = None
         self._initialized = False
+        self._lock = Lock()
+        
+        # ✅ 使用自定義快取（支援單項失效）
+        self._metadata_cache = MetadataCache(maxsize=1000, ttl=300)
         
     def _create_client(self) -> storage.Client:
         """創建 GCS client，優先使用服務帳號"""
@@ -79,7 +181,7 @@ class GCSConnectionPool:
         self._credentials = None
         self._initialized = False
         # 清除快取
-        self.get_blob_metadata.cache_clear()
+        self._metadata_cache.clear()
     
     def get_bucket(self, bucket_name: str) -> storage.Bucket:
         """獲取或創建 bucket 連接，支援自動重連"""
@@ -118,10 +220,9 @@ class GCSConnectionPool:
             logger.error(f"❌ Failed to get bucket: {e}", exc_info=True)
             raise
     
-    @lru_cache(maxsize=1000)
     def get_blob_metadata(self, bucket_name: str, blob_name: str) -> Optional[Dict]:
         """
-        快取 blob metadata，支援自動重連
+        獲取 blob metadata（帶快取）
         
         Args:
             bucket_name: GCS bucket 名稱
@@ -129,10 +230,16 @@ class GCSConnectionPool:
             
         Returns:
             metadata dict 或 None（如果不存在）
-            
-        Raises:
-            FileNotFoundError: 檔案不存在
         """
+        cache_key = f"{bucket_name}:{blob_name}"
+        
+        # ✅ 先檢查快取
+        cached = self._metadata_cache.get(cache_key)
+        if cached is not None:
+            logger.debug(f"📋 Metadata cache HIT: {blob_name}")
+            return cached
+        
+        # ✅ 快取未命中，從 GCS 獲取
         try:
             bucket = self.get_bucket(bucket_name)
             blob = bucket.blob(blob_name)
@@ -156,6 +263,9 @@ class GCSConnectionPool:
                 'public_url': f"https://storage.googleapis.com/{bucket_name}/{blob.name}",
                 'metadata': blob.metadata or {}
             }
+            
+            # ✅ 儲存到快取
+            self._metadata_cache.set(cache_key, metadata)
             
             logger.debug(f"📋 Metadata cached: {blob_name} ({blob.size:,} bytes)")
             return metadata
@@ -188,6 +298,8 @@ class GCSConnectionPool:
                     'metadata': blob.metadata or {}
                 }
                 
+                self._metadata_cache.set(cache_key, metadata)
+                
                 logger.info(f"✅ Retry successful, metadata retrieved: {blob_name}")
                 return metadata
                 
@@ -197,11 +309,34 @@ class GCSConnectionPool:
             
         except NotFound:
             logger.debug(f"📂 File not found: {blob_name}")
-            raise FileNotFoundError(f"File not found: {blob_name}")
+            return None
             
         except Exception as e:
             logger.error(f"❌ Failed to get metadata ({blob_name}): {e}", exc_info=True)
             raise
+    
+    def invalidate_metadata_cache(self, bucket_name: str, blob_name: str):
+        """
+        使特定 blob 的 metadata 快取失效
+        
+        Args:
+            bucket_name: GCS bucket 名稱
+            blob_name: blob 路徑
+        """
+        cache_key = f"{bucket_name}:{blob_name}"
+        self._metadata_cache.invalidate(cache_key)
+    
+    def invalidate_all_metadata_cache(self, bucket_name: str = None):
+        """
+        使所有 metadata 快取失效
+        
+        Args:
+            bucket_name: 如果指定，只清除該 bucket 的快取
+        """
+        if bucket_name:
+            self._metadata_cache.invalidate_prefix(f"{bucket_name}:")
+        else:
+            self._metadata_cache.clear()
     
     def file_exists(self, bucket_name: str, blob_name: str) -> bool:
         """
@@ -217,8 +352,6 @@ class GCSConnectionPool:
         try:
             metadata = self.get_blob_metadata(bucket_name, blob_name)
             return metadata is not None
-        except FileNotFoundError:
-            return False
         except Exception as e:
             logger.error(f"❌ Error checking file existence: {e}")
             return False
@@ -239,7 +372,7 @@ class GCSConnectionPool:
     def clear_cache(self):
         """清除所有快取"""
         logger.info("🗑️ Clearing metadata cache")
-        self.get_blob_metadata.cache_clear()
+        self._metadata_cache.clear()
     
     def get_cache_info(self) -> Dict:
         """
@@ -248,14 +381,7 @@ class GCSConnectionPool:
         Returns:
             Dict: 快取統計
         """
-        cache_info = self.get_blob_metadata.cache_info()
-        return {
-            'hits': cache_info.hits,
-            'misses': cache_info.misses,
-            'maxsize': cache_info.maxsize,
-            'currsize': cache_info.currsize,
-            'hit_rate': cache_info.hits / (cache_info.hits + cache_info.misses) if (cache_info.hits + cache_info.misses) > 0 else 0
-        }
+        return self._metadata_cache.get_info()
     
     def health_check(self) -> bool:
         """
