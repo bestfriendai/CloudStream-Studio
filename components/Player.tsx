@@ -19,12 +19,11 @@ export const Player: React.FC<PlayerProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const scrubberRef = useRef<HTMLDivElement>(null);
   
-  const isUpdatingTimeRef = useRef(false);
-  const lastUpdateTimeRef = useRef(0);
+  // ✅ 使用 ref 追蹤拖曳狀態，避免 Effect 依賴
+  const isDraggingRef = useRef(false);
+  const currentTimeRef = useRef(0);
   const lastBufferUpdate = useRef(0);
   const lastNetworkUpdate = useRef(0);
-  const currentTimeRef = useRef(0);
-  const lastSetTimeRef = useRef(0); // ✅ 新增：追蹤最後一次設置的時間
   
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -45,10 +44,8 @@ export const Player: React.FC<PlayerProps> = ({
   const [startPoint, setStartPoint] = useState(0);
   const [endPoint, setEndPoint] = useState(0);
   
-  const [isDraggingStart, setIsDraggingStart] = useState(false);
-  const [isDraggingEnd, setIsDraggingEnd] = useState(false);
-  const [isDraggingScrubber, setIsDraggingScrubber] = useState(false);
-  const [dragStartPosition, setDragStartPosition] = useState<{ x: number; y: number } | null>(null);
+  // ✅ 簡化拖曳狀態 - 使用單一狀態
+  const [dragType, setDragType] = useState<'start' | 'end' | 'scrubber' | null>(null);
 
   const roundToPrecision = useCallback((value: number, precision: number = 3): number => {
     const multiplier = Math.pow(10, precision);
@@ -125,18 +122,18 @@ export const Player: React.FC<PlayerProps> = ({
   useEffect(() => {
     if (!videoRef.current) return;
 
-    const video = videoRef.current;
+    const videoEl = videoRef.current;
     let isMounted = true;
 
     const handleProgress = () => {
-      if (!isMounted || video.buffered.length === 0 || video.duration === 0) return;
+      if (!isMounted || videoEl.buffered.length === 0 || videoEl.duration === 0) return;
       
       const now = Date.now();
       if (now - lastBufferUpdate.current < 500) return;
       lastBufferUpdate.current = now;
       
-      const bufferedEnd = video.buffered.end(video.buffered.length - 1);
-      const bufferedPercent = (bufferedEnd / video.duration) * 100;
+      const bufferedEnd = videoEl.buffered.end(videoEl.buffered.length - 1);
+      const bufferedPercent = (bufferedEnd / videoEl.duration) * 100;
       
       setBufferProgress(bufferedPercent);
     };
@@ -153,17 +150,17 @@ export const Player: React.FC<PlayerProps> = ({
       if (isMounted) setIsBuffering(true);
     };
 
-    video.addEventListener('progress', handleProgress);
-    video.addEventListener('waiting', handleWaiting);
-    video.addEventListener('canplaythrough', handleCanPlayThrough);
-    video.addEventListener('stalled', handleStalled);
+    videoEl.addEventListener('progress', handleProgress);
+    videoEl.addEventListener('waiting', handleWaiting);
+    videoEl.addEventListener('canplaythrough', handleCanPlayThrough);
+    videoEl.addEventListener('stalled', handleStalled);
 
     return () => {
       isMounted = false;
-      video.removeEventListener('progress', handleProgress);
-      video.removeEventListener('waiting', handleWaiting);
-      video.removeEventListener('canplaythrough', handleCanPlayThrough);
-      video.removeEventListener('stalled', handleStalled);
+      videoEl.removeEventListener('progress', handleProgress);
+      videoEl.removeEventListener('waiting', handleWaiting);
+      videoEl.removeEventListener('canplaythrough', handleCanPlayThrough);
+      videoEl.removeEventListener('stalled', handleStalled);
     };
   }, []);
 
@@ -183,12 +180,10 @@ export const Player: React.FC<PlayerProps> = ({
     setBufferProgress(0);
     setIsBuffering(false);
     setNetworkSpeed(null);
+    setDragType(null);
     
-    lastUpdateTimeRef.current = 0;
-    lastBufferUpdate.current = 0;
-    lastNetworkUpdate.current = 0;
     currentTimeRef.current = 0;
-    lastSetTimeRef.current = 0; // ✅ 重置
+    isDraggingRef.current = false;
     
     if (videoRef.current) {
       const videoElement = videoRef.current;
@@ -199,7 +194,7 @@ export const Player: React.FC<PlayerProps> = ({
     }
   }, [video]);
 
-  // ✅ 預覽時間點
+  // ✅ 預覽時間點 - 簡化邏輯
   useEffect(() => {
     if (!previewTime || !videoRef.current || duration === 0) return;
     
@@ -209,7 +204,8 @@ export const Player: React.FC<PlayerProps> = ({
     setEndPoint(previewTime.end);
     
     videoRef.current.currentTime = previewTime.start;
-    lastSetTimeRef.current = previewTime.start; // ✅ 記錄設置的時間
+    currentTimeRef.current = previewTime.start;
+    setCurrentTime(previewTime.start);
     
     const playTimeout = setTimeout(() => {
       if (videoRef.current) {
@@ -222,54 +218,12 @@ export const Player: React.FC<PlayerProps> = ({
     return () => clearTimeout(playTimeout);
   }, [previewTime, duration]);
 
-  // ✅ 修復 Effect 5 - 當 startPoint 改變時
-  useEffect(() => {
-    // ✅ 如果正在拖曳，完全跳過
-    if (isDraggingStart || isDraggingEnd || isDraggingScrubber) {
-      console.log('⏩ [Effect 5] 跳過執行 (正在拖曳)');
-      return;
-    }
-
-    if (!videoRef.current) return;
-    
-    // ✅ 限制執行頻率
-    const now = Date.now();
-    if (now - lastUpdateTimeRef.current < 100) {
-      console.log('⏩ [Effect 5] 跳過執行 (更新太頻繁)');
-      return;
-    }
-    lastUpdateTimeRef.current = now;
-    
-    const currentVideoTime = videoRef.current.currentTime;
-    
-    // ✅ 檢查是否是我們自己剛設置的時間
-    if (Math.abs(currentVideoTime - lastSetTimeRef.current) < 0.05) {
-      console.log('⏩ [Effect 5] 跳過執行 (時間剛被設置)');
-      return;
-    }
-    
-    // ✅ 增加容差到 0.1 秒
-    if (Math.abs(currentVideoTime - startPoint) > 0.1) {
-      console.log('⏩ [Effect 5] 執行跳轉:', {
-        from: currentVideoTime,
-        to: startPoint,
-        diff: Math.abs(currentVideoTime - startPoint)
-      });
-      
-      videoRef.current.currentTime = startPoint;
-      currentTimeRef.current = startPoint;
-      lastSetTimeRef.current = startPoint; // ✅ 記錄設置的時間
-    } else {
-      console.log('⏩ [Effect 5] 時間已同步，不需要跳轉');
-    }
-  }, [startPoint, isDraggingStart, isDraggingEnd, isDraggingScrubber]);
-
-  // ✅ 監控播放進度
+  // ✅ 監控播放進度 - 檢查邊界
   useEffect(() => {
     if (!videoRef.current || !isPlaying) return;
 
     const checkPlaybackBounds = () => {
-      if (!videoRef.current) return;
+      if (!videoRef.current || isDraggingRef.current) return;
       
       const current = videoRef.current.currentTime;
       
@@ -277,14 +231,8 @@ export const Player: React.FC<PlayerProps> = ({
         videoRef.current.pause();
         videoRef.current.currentTime = startPoint;
         currentTimeRef.current = startPoint;
-        lastSetTimeRef.current = startPoint; // ✅ 記錄
+        setCurrentTime(startPoint);
         setIsPlaying(false);
-      }
-      
-      if (current < startPoint) {
-        videoRef.current.currentTime = startPoint;
-        currentTimeRef.current = startPoint;
-        lastSetTimeRef.current = startPoint; // ✅ 記錄
       }
     };
 
@@ -322,85 +270,56 @@ export const Player: React.FC<PlayerProps> = ({
     };
   }, [isResizing]);
 
-  // ✅ 處理時間軸標記拖曳
+  // ✅ 核心修復：統一的拖曳處理
   useEffect(() => {
-    if (!isDraggingStart && !isDraggingEnd && !isDraggingScrubber) return;
+    if (!dragType) {
+      isDraggingRef.current = false;
+      return;
+    }
 
-    console.log('🎯 [拖曳] 開始拖曳:', {
-      isDraggingStart,
-      isDraggingEnd,
-      isDraggingScrubber
-    });
+    isDraggingRef.current = true;
+    console.log('🎯 開始拖曳:', dragType);
 
-    let animationFrameId: number;
-    let lastDragUpdate = 0;
-
-    const handleMarkerDrag = (e: MouseEvent) => {
-      if (!scrubberRef.current) return;
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!scrubberRef.current || !videoRef.current) return;
       
-      // ✅ 限制更新頻率
-      const now = Date.now();
-      if (now - lastDragUpdate < 16) return; // 60fps
-      lastDragUpdate = now;
+      const rect = scrubberRef.current.getBoundingClientRect();
+      const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
+      const percentage = x / rect.width;
+      const newTime = roundToPrecision(percentage * duration, 3);
       
-      if (animationFrameId) {
-        cancelAnimationFrame(animationFrameId);
+      if (dragType === 'start') {
+        const clampedStart = Math.max(0, Math.min(newTime, endPoint - 0.1));
+        setStartPoint(clampedStart);
+        videoRef.current.currentTime = clampedStart;
+        currentTimeRef.current = clampedStart;
+        setCurrentTime(clampedStart);
+      } else if (dragType === 'end') {
+        const clampedEnd = Math.max(startPoint + 0.1, Math.min(newTime, duration));
+        setEndPoint(clampedEnd);
+      } else if (dragType === 'scrubber') {
+        const clampedTime = Math.max(startPoint, Math.min(newTime, endPoint));
+        videoRef.current.currentTime = clampedTime;
+        currentTimeRef.current = clampedTime;
+        setCurrentTime(clampedTime);
       }
-      
-      animationFrameId = requestAnimationFrame(() => {
-        if (!scrubberRef.current) return;
-        
-        const rect = scrubberRef.current.getBoundingClientRect();
-        const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
-        const percentage = x / rect.width;
-        const newTime = roundToPrecision(percentage * duration, 3);
-        
-        if (isDraggingStart) {
-          const newStart = Math.min(newTime, endPoint - 0.001);
-          setStartPoint(roundToPrecision(newStart, 3));
-          if (videoRef.current) {
-            videoRef.current.currentTime = newStart;
-            currentTimeRef.current = newStart;
-            lastSetTimeRef.current = newStart; // ✅ 記錄
-          }
-        } else if (isDraggingEnd) {
-          const newEnd = Math.max(newTime, startPoint + 0.001);
-          setEndPoint(roundToPrecision(newEnd, 3));
-        } else if (isDraggingScrubber) {
-          const clampedTime = Math.max(startPoint, Math.min(newTime, endPoint));
-          if (videoRef.current) {
-            videoRef.current.currentTime = clampedTime;
-            currentTimeRef.current = clampedTime;
-            lastSetTimeRef.current = clampedTime; // ✅ 記錄
-          }
-        }
-      });
     };
 
-    const handleMarkerDragEnd = () => {
-      console.log('🎯 [拖曳] 結束拖曳');
-      
-      if (animationFrameId) {
-        cancelAnimationFrame(animationFrameId);
-      }
-      
-      setIsDraggingStart(false);
-      setIsDraggingEnd(false);
-      setIsDraggingScrubber(false);
-      setDragStartPosition(null);
+    const handleMouseUp = () => {
+      console.log('🎯 結束拖曳');
+      setDragType(null);
+      isDraggingRef.current = false;
     };
 
-    document.addEventListener('mousemove', handleMarkerDrag);
-    document.addEventListener('mouseup', handleMarkerDragEnd);
+    // ✅ 使用 passive: false 防止滾動
+    document.addEventListener('mousemove', handleMouseMove, { passive: false });
+    document.addEventListener('mouseup', handleMouseUp);
     
     return () => {
-      if (animationFrameId) {
-        cancelAnimationFrame(animationFrameId);
-      }
-      document.removeEventListener('mousemove', handleMarkerDrag);
-      document.removeEventListener('mouseup', handleMarkerDragEnd);
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [isDraggingStart, isDraggingEnd, isDraggingScrubber, duration, startPoint, endPoint, roundToPrecision]);
+  }, [dragType, duration, startPoint, endPoint, roundToPrecision]);
 
   const togglePlay = useCallback(() => {
     if (!videoRef.current) return;
@@ -413,7 +332,7 @@ export const Player: React.FC<PlayerProps> = ({
       if (current < startPoint || current >= endPoint) {
         videoRef.current.currentTime = startPoint;
         currentTimeRef.current = startPoint;
-        lastSetTimeRef.current = startPoint; // ✅ 記錄
+        setCurrentTime(startPoint);
       }
       
       videoRef.current.play()
@@ -426,34 +345,17 @@ export const Player: React.FC<PlayerProps> = ({
     }
   }, [isPlaying, startPoint, endPoint]);
 
-  // ✅ 修復 handleTimeUpdate
+  // ✅ 修復 handleTimeUpdate - 拖曳時跳過
   const handleTimeUpdate = useCallback(() => {
-    if (!videoRef.current || isUpdatingTimeRef.current) return;
+    if (!videoRef.current || isDraggingRef.current) return;
     
     const newTime = roundToPrecision(videoRef.current.currentTime, 3);
     
-    // ✅ 使用 ref 比較
-    if (Math.abs(newTime - currentTimeRef.current) < 0.01) return;
+    // 避免微小變化觸發更新
+    if (Math.abs(newTime - currentTimeRef.current) < 0.05) return;
     
-    // ✅ 檢查是否是我們剛設置的時間
-    if (Math.abs(newTime - lastSetTimeRef.current) < 0.05) {
-      console.log('🎬 [handleTimeUpdate] 跳過更新 (時間剛被設置)');
-      return;
-    }
-    
-    console.log('🎬 [handleTimeUpdate] 更新時間:', {
-      newTime,
-      oldTime: currentTimeRef.current,
-      diff: Math.abs(newTime - currentTimeRef.current)
-    });
-    
-    isUpdatingTimeRef.current = true;
     currentTimeRef.current = newTime;
-    
-    requestAnimationFrame(() => {
-      setCurrentTime(newTime);
-      isUpdatingTimeRef.current = false;
-    });
+    setCurrentTime(newTime);
   }, [roundToPrecision]);
 
   const handleLoadedMetadata = useCallback(() => {
@@ -549,8 +451,10 @@ export const Player: React.FC<PlayerProps> = ({
     console.log(`✅ 剪輯已添加到時間軸`);
   }, [video, startPoint, endPoint, onAddClip, formatTime, roundToPrecision]);
 
+  // ✅ 點擊時間軸跳轉
   const handleTimelineClick = useCallback((e: React.MouseEvent) => {
     if (!scrubberRef.current || !videoRef.current || !duration) return;
+    if (dragType) return; // 拖曳中不處理點擊
     
     const rect = scrubberRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
@@ -561,8 +465,23 @@ export const Player: React.FC<PlayerProps> = ({
     
     videoRef.current.currentTime = clampedTime;
     currentTimeRef.current = clampedTime;
-    lastSetTimeRef.current = clampedTime; // ✅ 記錄
-  }, [duration, startPoint, endPoint, roundToPrecision]);
+    setCurrentTime(clampedTime);
+  }, [duration, startPoint, endPoint, roundToPrecision, dragType]);
+
+  // ✅ 開始拖曳的處理函數
+  const handleStartDrag = useCallback((type: 'start' | 'end' | 'scrubber') => (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    // 拖曳時暫停播放
+    if (isPlaying && videoRef.current) {
+      videoRef.current.pause();
+      setIsPlaying(false);
+    }
+    
+    setDragType(type);
+  }, [isPlaying]);
+
   if (!video) {
     return (
       <div className="flex-1 flex items-center justify-center bg-black text-gray-500 flex-col min-h-0">
@@ -593,6 +512,7 @@ export const Player: React.FC<PlayerProps> = ({
             if (videoRef.current) {
               videoRef.current.currentTime = startPoint;
               currentTimeRef.current = startPoint;
+              setCurrentTime(startPoint);
             }
           }}
           onClick={togglePlay}
@@ -703,17 +623,13 @@ export const Player: React.FC<PlayerProps> = ({
         {/* Timeline */}
         <div 
           ref={scrubberRef} 
-          className="relative h-12 flex items-center shrink-0"
-          onMouseDown={(e) => {
-            if (e.target === e.currentTarget || (e.target as HTMLElement).classList.contains('timeline-track')) {
-              handleTimelineClick(e);
-            }
-          }}
+          className="relative h-12 flex items-center shrink-0 cursor-pointer"
+          onClick={handleTimelineClick}
         >
           {/* Buffer Progress */}
           {bufferProgress > 0 && duration > 0 && (
             <div 
-              className="absolute h-2 bg-gray-600/50 rounded"
+              className="absolute h-2 bg-gray-600/50 rounded pointer-events-none"
               style={{
                 left: 0,
                 width: `${bufferProgress}%`
@@ -722,19 +638,15 @@ export const Player: React.FC<PlayerProps> = ({
           )}
 
           {/* Timeline Track */}
-          <div className="timeline-track absolute left-0 right-0 h-2 bg-[#333] rounded pointer-events-auto"></div>
+          <div className="absolute left-0 right-0 h-2 bg-[#333] rounded pointer-events-none"></div>
 
           {/* Selected Range */}
           {duration > 0 && (
             <div 
-              className="absolute h-2 bg-blue-600/60 rounded cursor-pointer pointer-events-auto"
+              className="absolute h-2 bg-blue-600/60 rounded pointer-events-none"
               style={{
                 left: `${(startPoint / duration) * 100}%`,
                 width: `${((endPoint - startPoint) / duration) * 100}%`
-              }}
-              onMouseDown={(e) => {
-                e.stopPropagation();
-                handleTimelineClick(e);
               }}
             ></div>
           )}
@@ -743,90 +655,66 @@ export const Player: React.FC<PlayerProps> = ({
           {duration > 0 && currentTime >= startPoint && currentTime <= endPoint && (
             <div 
               className={`absolute w-0.5 h-8 bg-white z-20 cursor-ew-resize group/playhead transition-all ${
-                isDraggingScrubber ? 'w-1 bg-blue-400' : ''
+                dragType === 'scrubber' ? 'w-1 bg-blue-400' : ''
               }`}
               style={{ 
-                left: `${(currentTime / duration) * 100}%`
+                left: `${(currentTime / duration) * 100}%`,
+                transform: 'translateX(-50%)'
               }}
-              onMouseDown={(e) => {
-                e.stopPropagation();
-                e.preventDefault();
-                
-                setDragStartPosition({ x: e.clientX, y: e.clientY });
-                setIsDraggingScrubber(true);
-                
-                if (isPlaying && videoRef.current) {
-                  videoRef.current.pause();
-                  setIsPlaying(false);
-                }
-              }}
+              onMouseDown={handleStartDrag('scrubber')}
             >
               <div className={`absolute -top-1 -left-1.5 w-3 h-3 bg-white rotate-45 cursor-ew-resize hover:scale-125 transition-all ${
-                isDraggingScrubber ? 'scale-150 bg-blue-400' : ''
+                dragType === 'scrubber' ? 'scale-150 bg-blue-400' : ''
               }`}></div>
               
               <div className={`absolute -top-8 left-1/2 -translate-x-1/2 text-[10px] px-2 py-1 rounded whitespace-nowrap pointer-events-none transition-all ${
-                isDraggingScrubber 
+                dragType === 'scrubber' 
                   ? 'bg-blue-500 text-white opacity-100 scale-110' 
                   : 'bg-white/90 text-black opacity-0 group-hover/playhead:opacity-100'
               }`}>
                 {formatTime(currentTime)}
               </div>
               
-              <div className="absolute -left-3 -right-3 -top-2 -bottom-2 cursor-ew-resize"></div>
+              {/* 擴大點擊區域 */}
+              <div className="absolute -left-4 -right-4 -top-4 -bottom-4 cursor-ew-resize"></div>
             </div>
           )}
 
           {/* Start Marker */}
           {duration > 0 && (
             <div 
-              className="absolute w-4 h-8 bg-blue-500 rounded-l cursor-ew-resize z-30 flex items-center justify-center group hover:bg-blue-400 active:bg-blue-600 transition-colors"
+              className="absolute w-4 h-8 bg-blue-500 rounded-l cursor-ew-resize z-30 flex items-center justify-center group/start hover:bg-blue-400 active:bg-blue-600 transition-colors"
               style={{ 
                 left: `${(startPoint / duration) * 100}%`,
                 transform: 'translateX(-50%)'
               }}
-              onMouseDown={(e) => {
-                e.stopPropagation();
-                e.preventDefault();
-                
-                setDragStartPosition({ x: e.clientX, y: e.clientY });
-                setIsDraggingStart(true);
-                
-                if (isPlaying && videoRef.current) {
-                  videoRef.current.pause();
-                  setIsPlaying(false);
-                }
-              }}
+              onMouseDown={handleStartDrag('start')}
             >
               <div className="w-0.5 h-4 bg-white/50"></div>
-              <div className="absolute -top-8 bg-blue-600 text-white text-[10px] px-2 py-1 rounded opacity-0 group-hover:opacity-100 whitespace-nowrap pointer-events-none shadow-lg">
+              <div className="absolute -top-8 bg-blue-600 text-white text-[10px] px-2 py-1 rounded opacity-0 group-hover/start:opacity-100 whitespace-nowrap pointer-events-none shadow-lg">
                 Start: {formatTime(startPoint)}
               </div>
+              {/* 擴大點擊區域 */}
+              <div className="absolute -left-2 -right-2 -top-2 -bottom-2 cursor-ew-resize"></div>
             </div>
           )}
 
           {/* End Marker */}
           {duration > 0 && (
             <div 
-              className="absolute w-4 h-8 bg-blue-500 rounded-r cursor-ew-resize z-30 flex items-center justify-center group hover:bg-blue-400 active:bg-blue-600 transition-colors"
+              className="absolute w-4 h-8 bg-blue-500 rounded-r cursor-ew-resize z-30 flex items-center justify-center group/end hover:bg-blue-400 active:bg-blue-600 transition-colors"
               style={{ 
                 left: `${(endPoint / duration) * 100}%`,
                 transform: 'translateX(-50%)'
               }}
-              onMouseDown={(e) => {
-                e.stopPropagation();
-                e.preventDefault();
-                setIsDraggingEnd(true);
-                if (isPlaying && videoRef.current) {
-                  videoRef.current.pause();
-                  setIsPlaying(false);
-                }
-              }}
+              onMouseDown={handleStartDrag('end')}
             >
               <div className="w-0.5 h-4 bg-white/50"></div>
-              <div className="absolute -top-8 bg-blue-600 text-white text-[10px] px-2 py-1 rounded opacity-0 group-hover:opacity-100 whitespace-nowrap pointer-events-none shadow-lg">
+              <div className="absolute -top-8 bg-blue-600 text-white text-[10px] px-2 py-1 rounded opacity-0 group-hover/end:opacity-100 whitespace-nowrap pointer-events-none shadow-lg">
                 End: {formatTime(endPoint)}
               </div>
+              {/* 擴大點擊區域 */}
+              <div className="absolute -left-2 -right-2 -top-2 -bottom-2 cursor-ew-resize"></div>
             </div>
           )}
         </div>
@@ -850,6 +738,13 @@ export const Player: React.FC<PlayerProps> = ({
               {bufferProgress > 0 && bufferProgress < 100 && (
                 <div className="text-xs text-gray-500 shrink-0">
                   ({bufferProgress.toFixed(0)}% buffered)
+                </div>
+              )}
+              
+              {/* 拖曳狀態指示 */}
+              {dragType && (
+                <div className="text-xs text-blue-400 bg-blue-900/30 px-2 py-1 rounded">
+                  拖曳中: {dragType === 'start' ? '起點' : dragType === 'end' ? '終點' : '播放針'}
                 </div>
               )}
             </div>
@@ -884,7 +779,13 @@ export const Player: React.FC<PlayerProps> = ({
                 value={formatTime(startPoint)} 
                 onChange={(e) => {
                   const newTime = parseTimeString(e.target.value);
-                  setStartPoint(Math.min(newTime, endPoint - 0.001));
+                  const clampedTime = Math.min(newTime, endPoint - 0.1);
+                  setStartPoint(clampedTime);
+                  if (videoRef.current) {
+                    videoRef.current.currentTime = clampedTime;
+                    currentTimeRef.current = clampedTime;
+                    setCurrentTime(clampedTime);
+                  }
                 }}
                 placeholder="0:00.000"
                 disabled={!duration}
@@ -898,7 +799,7 @@ export const Player: React.FC<PlayerProps> = ({
                 value={formatTime(endPoint)} 
                 onChange={(e) => {
                   const newTime = parseTimeString(e.target.value);
-                  setEndPoint(Math.max(newTime, startPoint + 0.001));
+                  setEndPoint(Math.max(newTime, startPoint + 0.1));
                 }}
                 placeholder="0:00.000"
                 disabled={!duration}
